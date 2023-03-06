@@ -9,20 +9,20 @@ module scalar_class
    use iterator_class, only: iterator
    implicit none
    private
-   
+
    ! Expose type/constructor/methods
    public :: scalar,bcond
-   
+
    ! List of known available bcond for this solver
    integer, parameter, public :: dirichlet=2         !< Dirichlet condition
    integer, parameter, public :: neumann=3           !< Zero normal gradient
-   
+
    ! List of available advection schemes for scalar transport
    integer, parameter, public :: upwind=0            !< First order upwind scheme
    integer, parameter, public :: quick=1             !< Quick scheme
    integer, parameter, public :: bquick=2            !< BQuick scheme
-   
-   
+
+
    !> Boundary conditions for the incompressible solver
    type :: bcond
       type(bcond), pointer :: next                        !< Linked list of bconds
@@ -31,37 +31,37 @@ module scalar_class
       integer :: dir                                      !< Bcond direction (1 to 6)
       type(iterator) :: itr                               !< This is the iterator for the bcond
    end type bcond
-   
+
    !> Bcond shift value
    integer, dimension(3,6), parameter :: shift=reshape([+1,0,0,-1,0,0,0,+1,0,0,-1,0,0,0,+1,0,0,-1],shape(shift))
-   
+
    !> Constant density scalar solver object definition
    type :: scalar
-      
+
       ! This is our config
       class(config), pointer :: cfg                       !< This is the config the solver is build for
-      
+
       ! This is the name of the solver
       character(len=str_medium) :: name='UNNAMED_SCALAR'  !< Solver name (default=UNNAMED_SCALAR)
-      
+
       ! Constant property fluid, but diffusivity is still a field due to LES modeling
       real(WP) :: rho                                     !< This is our constant fluid density
       real(WP), dimension(:,:,:), allocatable :: diff     !< These is our constant+SGS dynamic diffusivity for the scalar
-      
+
       ! Boundary condition list
       integer :: nbc                                      !< Number of bcond for our solver
       type(bcond), pointer :: first_bc                    !< List of bcond for our solver
-      
+
       ! Scalar variable
       real(WP), dimension(:,:,:), allocatable :: SC       !< SC array
-      
+
       ! Old scalar variable
       real(WP), dimension(:,:,:), allocatable :: SCold    !< SCold array
-      
+
       ! Implicit scalar solver
       class(linsol), pointer :: implicit                  !< Iterative linear solver object for an implicit prediction of the scalar residual
       integer, dimension(:,:,:), allocatable :: stmap     !< Inverse map from stencil shift to index location
-      
+
       ! Metrics
       integer :: scheme                                   !< Advection scheme for scalar
       integer :: nst                                      !< Scheme order (and elemental stencil size)
@@ -72,17 +72,17 @@ module scalar_class
       real(WP), dimension(:,:,:,:), allocatable :: div_x ,div_y ,div_z   !< Divergence for SC
       real(WP), dimension(:,:,:,:), allocatable :: grd_x ,grd_y ,grd_z   !< Scalar gradient for SC
       real(WP), dimension(:,:,:,:), allocatable :: itp_x ,itp_y ,itp_z   !< Second order interpolation for SC diffusivity
-      
+
       ! Bquick requires additional storage
-	   real(WP), dimension(:,:,:,:), allocatable :: bitp_xp,bitp_yp,bitp_zp  !< Plus interpolation for SC  - backup
+      real(WP), dimension(:,:,:,:), allocatable :: bitp_xp,bitp_yp,bitp_zp  !< Plus interpolation for SC  - backup
       real(WP), dimension(:,:,:,:), allocatable :: bitp_xm,bitp_ym,bitp_zm  !< Minus interpolation for SC - backup
 
       ! Masking info for metric modification
       integer, dimension(:,:,:), allocatable :: mask      !< Integer array used for modifying SC metrics
-      
+
       ! Monitoring quantities
       real(WP) :: SCmax,SCmin,SCint                       !< Maximum and minimum, integral scalar
-      
+
    contains
       procedure :: print=>scalar_print                    !< Output solver to the screen
       procedure :: setup                                  !< Finish configuring the scalar solver
@@ -98,16 +98,16 @@ module scalar_class
       procedure :: get_int                                !< Calculate integral field values
       procedure :: solve_implicit                         !< Solve for the scalar residuals implicitly
    end type scalar
-   
-   
+
+
    !> Declare scalar solver constructor
    interface scalar
       procedure constructor
    end interface scalar
-   
+
 contains
-   
-   
+
+
    !> Default constructor for scalar solver
    function constructor(cfg,scheme,name) result(self)
       use messager, only: die
@@ -117,30 +117,30 @@ contains
       integer, intent(in) :: scheme
       character(len=*), optional :: name
       integer :: i,j,k
-      
+
       ! Set the name for the solver
       if (present(name)) self%name=trim(adjustl(name))
-      
+
       ! Point to pgrid object
       self%cfg=>cfg
-      
+
       ! Nullify bcond list
       self%nbc=0
       self%first_bc=>NULL()
-      
+
       ! Allocate variables
       allocate(self%SC   (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%SC   =0.0_WP
       allocate(self%SCold(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%SCold=0.0_WP
       allocate(self%diff (self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%diff =0.0_WP
-      
+
       ! Prepare advection scheme
       self%scheme=scheme
       select case (self%scheme)
       case (upwind)
          ! Check current overlap
-		   if (self%cfg%no.lt.1) call die('[scalar constructor] Scalar transport scheme requires larger overlap')
+         if (self%cfg%no.lt.1) call die('[scalar constructor] Scalar transport scheme requires larger overlap')
          ! Set interpolation stencil sizes
-		   self%nst=1
+         self%nst=1
          self%stp1=-(self%nst+1)/2; self%stp2=self%nst+self%stp1-1
          self%stm1=-(self%nst-1)/2; self%stm2=self%nst+self%stm1-1
       case (quick)
@@ -152,18 +152,18 @@ contains
          self%stm1=-(self%nst-1)/2; self%stm2=self%nst+self%stm1-1
       case (bquick)
          ! Check current overlap
-	      if (self%cfg%no.lt.2) call die('[scalar constructor] Scalar transport scheme requires larger overlap')
-	      ! Set interpolation stencil sizes
-	      self%nst=3
-	      self%stp1=-(self%nst+1)/2; self%stp2=self%nst+self%stp1-1
-	      self%stm1=-(self%nst-1)/2; self%stm2=self%nst+self%stm1-1
+         if (self%cfg%no.lt.2) call die('[scalar constructor] Scalar transport scheme requires larger overlap')
+         ! Set interpolation stencil sizes
+         self%nst=3
+         self%stp1=-(self%nst+1)/2; self%stp2=self%nst+self%stp1-1
+         self%stm1=-(self%nst-1)/2; self%stm2=self%nst+self%stm1-1
       case default
          call die('[scalar constructor] Unknown scalar transport scheme selected')
       end select
-      
+
       ! Prepare default metrics
       call self%init_metrics()
-      
+
       ! Prepare mask for SC
       allocate(self%mask(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%mask=0
       if (.not.self%cfg%xper) then
@@ -186,17 +186,17 @@ contains
          end do
       end do
       call self%cfg%sync(self%mask)
-      
+
    end function constructor
-      
-   
+
+
    !> Metric initialization with no awareness of walls nor bcond
    subroutine init_metrics(this)
       use mathtools, only: fv_itp_build
       implicit none
       class(scalar), intent(inout) :: this
       integer :: i,j,k
-      
+
       ! Allocate finite difference diffusivity interpolation coefficients
       allocate(this%itp_x(-1:0,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< X-face-centered
       allocate(this%itp_y(-1:0,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< Y-face-centered
@@ -211,7 +211,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Allocate finite difference scalar interpolation coefficients
       allocate(this%itp_xp(this%stp1:this%stp2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< X-face-centered
       allocate(this%itp_xm(this%stm1:this%stm2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< X-face-centered
@@ -242,7 +242,7 @@ contains
             end do
          end do
       end select
-      
+
       ! Allocate finite volume divergence operators
       allocate(this%div_x(0:+1,this%cfg%imin_:this%cfg%imax_,this%cfg%jmin_:this%cfg%jmax_,this%cfg%kmin_:this%cfg%kmax_)) !< Cell-centered
       allocate(this%div_y(0:+1,this%cfg%imin_:this%cfg%imax_,this%cfg%jmin_:this%cfg%jmax_,this%cfg%kmin_:this%cfg%kmax_)) !< Cell-centered
@@ -257,7 +257,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Allocate finite difference velocity gradient operators
       allocate(this%grd_x(-1:0,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< X-face-centered
       allocate(this%grd_y(-1:0,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)) !< Y-face-centered
@@ -272,19 +272,19 @@ contains
             end do
          end do
       end do
-      
+
    end subroutine init_metrics
-   
-   
+
+
    !> Metric adjustment accounting for bconds and walls - zero out div at bcond and walls
    subroutine adjust_metrics(this)
       implicit none
       class(scalar), intent(inout) :: this
       integer :: i,j,k
-      
+
       ! Sync up masks
       call this%cfg%sync(this%mask)
-      
+
       ! Adjust interpolation coefficients to cell faces
       do k=this%cfg%kmin_,this%cfg%kmax_+1
          do j=this%cfg%jmin_,this%cfg%jmax_+1
@@ -301,7 +301,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Adjust scalar interpolation to reflect Dirichlet boundaries
       do k=this%cfg%kmin_,this%cfg%kmax_+1
          do j=this%cfg%jmin_,this%cfg%jmax_+1
@@ -336,7 +336,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Loop over the domain and apply masked conditions to SC divergence
       do k=this%cfg%kmin_,this%cfg%kmax_
          do j=this%cfg%jmin_,this%cfg%jmax_
@@ -349,7 +349,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Adjust gradient coefficients to cell faces for walls (assume Neumann at wall)
       do k=this%cfg%kmin_,this%cfg%kmax_+1
          do j=this%cfg%jmin_,this%cfg%jmax_+1
@@ -360,7 +360,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Adjust metrics to account for lower dimensionality
       if (this%cfg%nx.eq.1) then
          this%div_x=0.0_WP
@@ -374,22 +374,22 @@ contains
          this%div_z=0.0_WP
          this%grd_z=0.0_WP
       end if
-      
+
    end subroutine adjust_metrics
-   
-   
+
+
    !> Finish setting up the scalar solver now that bconds have been defined
    subroutine setup(this,implicit_solver)
       implicit none
       class(scalar), intent(inout) :: this
       class(linsol), target, intent(in), optional :: implicit_solver
       integer :: count,st
-      
+
       ! Adjust metrics based on mask array
       call this%adjust_metrics()
-      
+
       ! Bquick needs to remember the quick coefficients
-	   select case (this%scheme)
+      select case (this%scheme)
       case (bquick)
          allocate(this%bitp_xp(this%stp1:this%stp2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)); this%bitp_xp=this%itp_xp
          allocate(this%bitp_xm(this%stm1:this%stm2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)); this%bitp_xm=this%itp_xm
@@ -398,13 +398,13 @@ contains
          allocate(this%bitp_zp(this%stp1:this%stp2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)); this%bitp_zp=this%itp_zp
          allocate(this%bitp_zm(this%stm1:this%stm2,this%cfg%imin_:this%cfg%imax_+1,this%cfg%jmin_:this%cfg%jmax_+1,this%cfg%kmin_:this%cfg%kmax_+1)); this%bitp_zm=this%itp_zm
       end select
-      
+
       ! Prepare implicit solver if it had been provided
       if (present(implicit_solver)) then
-         
+
          ! Point to implicit solver linsol object
          this%implicit=>implicit_solver
-         
+
          ! Set dynamic stencil map for the scalar solver
          count=1; this%implicit%stc(count,:)=[0,0,0]
          do st=1,abs(this%stp1)
@@ -415,18 +415,18 @@ contains
             count=count+1; this%implicit%stc(count,:)=[0,0,+st]
             count=count+1; this%implicit%stc(count,:)=[0,0,-st]
          end do
-         
+
          ! Set the diagonal to 1 to make sure all cells participate in solver
          this%implicit%opr(1,:,:,:)=1.0_WP
-         
+
          ! Initialize the implicit velocity solver
          call this%implicit%init()
-         
+
       end if
-      
+
    end subroutine setup
-   
-   
+
+
    !> Add a boundary condition
    subroutine add_bcond(this,name,type,locator,dir)
       use string,         only: lowercase
@@ -440,7 +440,7 @@ contains
       character(len=2), optional :: dir
       type(bcond), pointer :: new_bc
       integer :: i,j,k,n
-      
+
       ! Prepare new bcond
       allocate(new_bc)
       new_bc%name=trim(adjustl(name))
@@ -460,14 +460,14 @@ contains
          new_bc%dir=0
       end if
       new_bc%itr=iterator(this%cfg,new_bc%name,locator,'c')
-      
+
       ! Insert it up front
       new_bc%next=>this%first_bc
       this%first_bc=>new_bc
-      
+
       ! Increment bcond counter
       this%nbc=this%nbc+1
-      
+
       ! Now adjust the metrics accordingly
       select case (new_bc%type)
       case (dirichlet)
@@ -480,10 +480,10 @@ contains
       case default
          call die('[scalar apply_bcond] Unknown bcond type')
       end select
-   
+
    end subroutine add_bcond
-   
-   
+
+
    !> Get a boundary condition
    subroutine get_bcond(this,name,my_bc)
       use messager, only: die
@@ -498,59 +498,58 @@ contains
       end do search
       if (.not.associated(my_bc)) call die('[scalar get_bcond] Boundary condition was not found')
    end subroutine get_bcond
-   
-   
+
+
    !> Enforce boundary condition
    subroutine apply_bcond(this,t,dt)
       use messager, only: die
       use mpi_f08,  only: MPI_MAX
-      use parallel, only: MPI_REAL_WP
       implicit none
       class(scalar), intent(inout) :: this
       real(WP), intent(in) :: t,dt
       integer :: i,j,k,n
       type(bcond), pointer :: my_bc
-      
+
       ! Traverse bcond list
       my_bc=>this%first_bc
       do while (associated(my_bc))
-         
+
          ! Only processes inside the bcond work here
          if (my_bc%itr%amIn) then
-            
+
             ! Select appropriate action based on the bcond type
             select case (my_bc%type)
-               
+
             case (dirichlet)           ! Apply Dirichlet conditions
-               
+
                ! This is done by the user directly
                ! Unclear whether we want to do this within the solver...
-               
+
             case (neumann)             ! Apply Neumann condition
-               
+
                ! Implement based on bcond direction
                do n=1,my_bc%itr%n_
                   i=my_bc%itr%map(1,n); j=my_bc%itr%map(2,n); k=my_bc%itr%map(3,n)
                   this%SC(i,j,k)=this%SC(i-shift(1,my_bc%dir),j-shift(2,my_bc%dir),k-shift(3,my_bc%dir))
                end do
-               
+
             case default
                call die('[scalar apply_bcond] Unknown bcond type')
             end select
-            
+
          end if
-         
+
          ! Sync full fields after each bcond - this should be optimized
          call this%cfg%sync(this%SC)
-         
+
          ! Move on to the next bcond
          my_bc=>my_bc%next
-         
+
       end do
-      
+
    end subroutine apply_bcond
-   
-   
+
+
    !> Calculate the explicit rhoSC time derivative based on rhoU/rhoV/rhoW
    subroutine get_drhoSCdt(this,drhoSCdt,rhoU,rhoV,rhoW)
       implicit none
@@ -599,8 +598,8 @@ contains
       ! Sync residual
       call this%cfg%sync(drhoSCdt)
    end subroutine get_drhoSCdt
-   
-   
+
+
    !> Calculate the min and max of our SC field
    subroutine get_max(this)
       use mpi_f08,  only: MPI_ALLREDUCE,MPI_MAX,MPI_MIN
@@ -612,16 +611,16 @@ contains
       my_SCmax=maxval(this%SC); call MPI_ALLREDUCE(my_SCmax,this%SCmax,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr)
       my_SCmin=minval(this%SC); call MPI_ALLREDUCE(my_SCmin,this%SCmin,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr)
    end subroutine get_max
-   
-   
+
+
    !> Calculate the integral of our SC field
    subroutine get_int(this)
       implicit none
       class(scalar), intent(inout) :: this
       call this%cfg%integrate(this%SC,integral=this%SCint)
    end subroutine get_int
-   
-   
+
+
    !> Solve for implicit scalar residual
    subroutine solve_implicit(this,dt,resSC,rhoU,rhoV,rhoW)
       implicit none
@@ -632,7 +631,7 @@ contains
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in)    :: rhoV  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in)    :: rhoW  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       integer :: i,j,k,sti,std
-      
+
       ! Prepare convective operator
       this%implicit%opr(1,:,:,:)=this%rho; this%implicit%opr(2:,:,:,:)=0.0_WP
       do k=this%cfg%kmin_,this%cfg%kmax_
@@ -656,7 +655,7 @@ contains
             end do
          end do
       end do
-      
+
       ! Prepare diffusive operator
       do k=this%cfg%kmin_,this%cfg%kmax_
          do j=this%cfg%jmin_,this%cfg%jmax_
@@ -676,36 +675,36 @@ contains
             end do
          end do
       end do
-      
+
       ! Solve the linear system
       call this%implicit%setup()
       this%implicit%rhs=resSC
       this%implicit%sol=0.0_WP
       call this%implicit%solve()
       resSC=this%implicit%sol
-      
+
       ! Sync up residual
       call this%cfg%sync(resSC)
-      
+
    end subroutine solve_implicit
-   
-   
+
+
    !> Metric resetting for adaptive discretization like bquick
    subroutine metric_reset(this)
-	  implicit none
-	  class(scalar), intent(inout) :: this
-	  select case (this%scheme)
-	  case (bquick)
-	     this%itp_xp=this%bitp_xp
-	     this%itp_xm=this%bitp_xm
-	     this%itp_yp=this%bitp_yp
-	     this%itp_ym=this%bitp_ym
-	     this%itp_zp=this%bitp_zp
-	     this%itp_zm=this%bitp_zm
-	  end select
+     implicit none
+     class(scalar), intent(inout) :: this
+     select case (this%scheme)
+     case (bquick)
+        this%itp_xp=this%bitp_xp
+        this%itp_xm=this%bitp_xm
+        this%itp_yp=this%bitp_yp
+        this%itp_ym=this%bitp_ym
+        this%itp_zp=this%bitp_zp
+        this%itp_zm=this%bitp_zm
+     end select
    end subroutine metric_reset
-   
-   
+
+
    !> Adjust adaptive metrics like bquick
    subroutine metric_adjust(this,SC,SCmin,SCmax)
       implicit none
@@ -727,7 +726,7 @@ contains
                         !this%itp_ym(i,j:j+1,k)=[0.0_WP,1.0_WP,0.0_WP]
                         !this%itp_zp(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
                         !this%itp_zm(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
-					      end if
+                     end if
                   end do
                end do
             end do
@@ -738,32 +737,32 @@ contains
                   do i=this%cfg%imin_,this%cfg%imax_+1
                      if (SC(i,j,k).gt.SCmax) then
                         !this%itp_xp(i:i+1,j,k)=[0.0_WP,1.0_WP,0.0_WP]
-					         !this%itp_xm(i:i+1,j,k)=[0.0_WP,1.0_WP,0.0_WP]
-					         !this%itp_yp(i,j:j+1,k)=[0.0_WP,1.0_WP,0.0_WP]
-					         !this%itp_ym(i,j:j+1,k)=[0.0_WP,1.0_WP,0.0_WP]
-					         !this%itp_zp(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
-					         !this%itp_zm(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
-				         end if
+                        !this%itp_xm(i:i+1,j,k)=[0.0_WP,1.0_WP,0.0_WP]
+                        !this%itp_yp(i,j:j+1,k)=[0.0_WP,1.0_WP,0.0_WP]
+                        !this%itp_ym(i,j:j+1,k)=[0.0_WP,1.0_WP,0.0_WP]
+                        !this%itp_zp(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
+                        !this%itp_zm(i,j,k:k+1)=[0.0_WP,1.0_WP,0.0_WP]
+                     end if
                   end do
                end do
             end do
          end if
       end select
    end subroutine metric_adjust
-   
-   
+
+
    !> Print out info for scalar solver
    subroutine scalar_print(this)
       use, intrinsic :: iso_fortran_env, only: output_unit
       implicit none
       class(scalar), intent(in) :: this
-      
+
       ! Output
       if (this%cfg%amRoot) then
          write(output_unit,'("Constant density scalar solver [",a,"] for config [",a,"]")') trim(this%name),trim(this%cfg%name)
       end if
-      
+
    end subroutine scalar_print
-   
-   
+
+
 end module scalar_class

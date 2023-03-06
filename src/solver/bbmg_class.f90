@@ -8,36 +8,36 @@ module bbmg_class
    use mpi_f08
    implicit none
    private
-   
+
    ! Expose type/constructor/methods
    public :: bbmg
-   
+
    ! Level data object definition
    type :: lvl_data
-      
+
       ! Global sizes
       integer :: ncell,ncello
       integer :: nx,imin,imax,nxo,imino,imaxo
       integer :: ny,jmin,jmax,nyo,jmino,jmaxo
       integer :: nz,kmin,kmax,nzo,kmino,kmaxo
-      
+
       ! Local sizes
       integer :: ncell_,ncello_
       integer :: nx_,imin_,imax_,nxo_,imino_,imaxo_
       integer :: ny_,jmin_,jmax_,nyo_,jmino_,jmaxo_
       integer :: nz_,kmin_,kmax_,nzo_,kmino_,kmaxo_
-      
+
       ! Operators
       real(WP), dimension(:,:,:,:,:,:), allocatable :: c2f
       real(WP), dimension(:,:,:,:,:,:), allocatable :: f2c
       real(WP), dimension(:,:,:,:,:,:), allocatable :: opr
       real(WP), dimension(:,:,:,:,:,:), allocatable :: oprc2f
-      
+
       ! Vectors
       real(WP), dimension(:,:,:), allocatable :: v
       real(WP), dimension(:,:,:), allocatable :: f
       real(WP), dimension(:,:,:), allocatable :: r
-      
+
       ! Parallel information
       logical, dimension(:), allocatable :: send_xm,send_xp
       logical, dimension(:), allocatable :: send_ym,send_yp
@@ -48,16 +48,16 @@ module bbmg_class
       integer :: recv_xm,recv_xp
       integer :: recv_ym,recv_yp
       integer :: recv_zm,recv_zp
-      
+
    end type lvl_data
-   
-   
+
+
    !> BBMG object definition
    type :: bbmg
-      
+
       ! A BBMG has a name
       character(len=str_medium) :: name                               !< Name of solver
-      
+
       ! Parallel information
       type(MPI_Comm) :: comm                                          !< Grid communicator
       logical :: amRoot                                               !< Root process for messaging
@@ -66,27 +66,27 @@ module bbmg_class
       integer :: irank                                                !< Rank info
       integer :: iproc,jproc,kproc                                    !< Processor coordinates
       integer, dimension(:,:,:), allocatable :: rank                  !< Cartesian rank information
-      
+
       ! General grid information
       integer :: no                                                   !< Size of the grid overlap
       logical :: xper,yper,zper                                       !< Periodicity info for the problem
-      
+
       ! General operator information
       integer :: nstx                                                 !< Number of diagonal in x
       integer :: nsty                                                 !< Number of diagonal in y
       integer :: nstz                                                 !< Number of diagonal in z
-      
+
       ! Direct solver data
       integer :: np                                                   !< Direct problem size
       integer , dimension(:),   allocatable :: piv                    !< Pivoting data
       real(WP), dimension(:),   allocatable :: myrhs,rhs              !< Local and assembled RHS
       real(WP), dimension(:,:), allocatable :: myOP,OP                !< Local and assembled operator
-      
+
       ! Solver information
       real(WP) :: my_res0                                             !< Initial L_infty norm of the residual
       real(WP) :: my_res                                              !< Current L_infty norm of the residual
       integer  :: my_ite                                              !< Current number of iterations
-      
+
       ! Configurable solver parameters
       real(WP) :: max_res                                             !< Maximum residual - the solver will attempt to converge below that value
       integer  :: max_ite                                             !< Maximum number of iterations - the solver will not got past that value
@@ -96,61 +96,61 @@ module bbmg_class
       integer  :: ncell_coarsest=0                                    !< Coarsest problem size allowed
       logical  :: use_direct_solve=.false.                            !< Use direct solve at the coarsest level (default is false)
       logical  :: use_krylov=.true.                                   !< Use BBMG as a preconditioner to a CG (default is true)
-      
+
       ! Level data management
       integer :: nlvl                                                 !< Number of multigrid levels created - by default all will be used. This can be reduced by the user.
       type(lvl_data), dimension(:), allocatable :: lvl                !< Entire data at each level
-      
+
       ! Krylov solver data
       real(WP), dimension(:,:,:), allocatable :: res,pp,zz,Ap,sol     !< Krylov solver work vectors
       real(WP) :: alpha,beta,rho1,rho2                                !< Krylov solver coefficients
-      
+
    contains
-      
+
       procedure :: update                                             !< Operator update (every time the operator changes)
       procedure :: solve                                              !< Solve the linear system
       procedure :: mgsolve                                            !< Solve the linear system with multigrid
       procedure :: cgsolve                                            !< Solve the linear system with CG
       procedure :: initialize                                         !< Initialize the solver
-      
+
       procedure :: recompute_prolongation                             !< Recompute the prolongation at a given level
       procedure :: recompute_restriction                              !< Recompute the restriction at a given level
       procedure :: recompute_operator                                 !< Recompute the operator at a given level
       procedure :: recompute_direct                                   !< Recompute the direct problem at the final level
-      
+
       procedure :: get_residual                                       !< Compute the residual at a given level
       procedure :: c2f                                                !< Prolongate from a level to the next finer level
       procedure :: f2c                                                !< Restrict from a level to the next coarser level
       procedure :: relax                                              !< Relax the problem at a given level
       procedure :: direct_solve                                       !< Solve directly the problem at the final level
       procedure :: cycle                                              !< Perform a multigrid cycle
-      
+
       generic :: sync=>vsync,msync                                    !< Synchronization at boundaries
       procedure, private :: vsync                                     !< Synchronize boundaries for a vector at a given level
       procedure, private :: msync                                     !< Synchronize boundaries for a matrix at a given level
-      
+
       procedure :: pmodx,pmody,pmodz                                  !< Parity calculation that accounts for periodicity
-      
+
    end type bbmg
-   
-   
+
+
    !> Declare bbmg constructor
    interface bbmg
       procedure bbmg_from_pgrid
    end interface bbmg
-   
-   
+
+
 contains
-   
-   
+
+
    !> Division of an integer by 2
    pure integer function div(ind)
      implicit none
      integer, intent(in) :: ind
      div=ind/2+mod(ind,2)
    end function div
-   
-   
+
+
    !> Parity of point i shifted by n to ensure 1<=i<=n
    pure integer function pmodx(this,i,n)
       class(bbmg), intent(in) :: this
@@ -179,8 +179,8 @@ contains
          pmodz=1-mod(i,2)
       end if
    end function pmodz
-   
-   
+
+
    !> Constructor for a BBMG object - this sets the grid and storage
    function bbmg_from_pgrid(pg,name,nst) result(self)
       use messager,    only: die
@@ -190,7 +190,7 @@ contains
       class(pgrid), intent(in) :: pg
       character(len=*), intent(in) :: name
       integer, dimension(3), intent(in) :: nst
-      
+
       ! Process the operator size
       initialize_overlap: block
          integer :: maxst
@@ -201,7 +201,7 @@ contains
          maxst=max(self%nstx,self%nsty,self%nstz)
          self%no=(maxst-1)/2
       end block initialize_overlap
-      
+
       ! First build the hierarchy of grids
       initialize_grid: block
          integer :: i,n1,n2,n3,nlvl_x,nlvl_y,nlvl_z
@@ -340,7 +340,7 @@ contains
             end if
          end do lvl_loop
       end block initialize_grid
-      
+
       ! Now prepare operator storage
       initialize_operator: block
          integer :: n
@@ -367,7 +367,7 @@ contains
             allocate(self%lvl(n)%r(self%lvl(n)%imino_:self%lvl(n)%imaxo_,self%lvl(n)%jmino_:self%lvl(n)%jmaxo_,self%lvl(n)%kmino_:self%lvl(n)%kmaxo_)); self%lvl(n)%r=0.0_WP
          end do
       end block initialize_operator
-      
+
       ! Now prepare communication data
       initialize_comm: block
          integer :: ip,jp,kp,n,ierr
@@ -567,19 +567,17 @@ contains
          ! Deallocate work arrays
          deallocate(buf,mino_,min_,max_,maxo_,ncello_rank)
       end block initialize_comm
-      
+
    end function bbmg_from_pgrid
-   
-   
+
+
    !> Initialize the solver
    subroutine initialize(this)
       use messager, only: die
-      use param,    only: verbose
-      use parallel, only: MPI_REAL_WP
       implicit none
       class(bbmg), intent(inout) :: this
       integer :: i
-      
+
       ! Recompute the coarsest level
       lvl_loop: do i=1,this%nlvl
          if (this%lvl(i)%ncell.le.this%ncell_coarsest) then
@@ -587,7 +585,7 @@ contains
             exit lvl_loop
          end if
       end do lvl_loop
-      
+
       ! Initialize the CG if needed
       if (this%use_krylov) then
          allocate(this%sol(this%lvl(1)%imino_:this%lvl(1)%imaxo_,this%lvl(1)%jmino_:this%lvl(1)%jmaxo_,this%lvl(1)%kmino_:this%lvl(1)%kmaxo_)); this%sol=0.0_WP
@@ -596,10 +594,10 @@ contains
          allocate(this%pp (this%lvl(1)%imino_:this%lvl(1)%imaxo_,this%lvl(1)%jmino_:this%lvl(1)%jmaxo_,this%lvl(1)%kmino_:this%lvl(1)%kmaxo_)); this%pp =0.0_WP
          allocate(this%zz (this%lvl(1)%imino_:this%lvl(1)%imaxo_,this%lvl(1)%jmino_:this%lvl(1)%jmaxo_,this%lvl(1)%kmino_:this%lvl(1)%kmaxo_)); this%zz =0.0_WP
       end if
-      
+
    end subroutine initialize
-   
-   
+
+
    !> Solve the linear system
    subroutine solve(this)
       use parallel, only: MPI_REAL_WP
@@ -637,12 +635,11 @@ contains
          call this%mgsolve()
       end if
    end subroutine solve
-   
-   
+
+
    !> Solve the linear system iteratively with CG
    subroutine cgsolve(this)
       use messager, only: die
-      use param,    only: verbose
       use parallel, only: MPI_REAL_WP
       implicit none
       class(bbmg), intent(inout) :: this
@@ -701,12 +698,11 @@ contains
       ! Put the solution back
       this%lvl(1)%v=this%sol
    end subroutine cgsolve
-   
-   
+
+
    !> Solve the linear system iteratively with multigrid
    subroutine mgsolve(this)
       use messager, only: die
-      use param,    only: verbose
       use parallel, only: MPI_REAL_WP
       implicit none
       class(bbmg), intent(inout) :: this
@@ -726,8 +722,8 @@ contains
          if (this%my_res.le.this%max_res) exit cycle_loop
       end do cycle_loop
    end subroutine mgsolve
-   
-   
+
+
    !> Perform a multigrid cycle
    recursive subroutine cycle(this,n)
       use messager, only: die
@@ -774,7 +770,7 @@ contains
          dir=-dir
       end do
    end subroutine cycle
-   
+
    !> Application of the prolongation
    subroutine c2f(this,Ac,nc,Af,nf)
       use messager, only: die
@@ -799,8 +795,8 @@ contains
       ! Synchronize vector
       call this%sync(Af,nf)
    end subroutine c2f
-   
-   
+
+
    !> Application of the restriction
    subroutine f2c(this,Af,nf,Ac,nc)
       use messager, only: die
@@ -825,8 +821,8 @@ contains
       ! Synchronize vector
       call this%sync(Ac,nc)
    end subroutine f2c
-   
-   
+
+
    !> Get the residual
    subroutine get_residual(this,n)
       implicit none
@@ -842,8 +838,8 @@ contains
       end do
       call this%sync(this%lvl(n)%r,n)
    end subroutine get_residual
-   
-   
+
+
    !> Relax the problem with an 8 color Gauss-Seidel
    subroutine relax(this,A,B,n,dir)
       use messager, only: die
@@ -885,8 +881,8 @@ contains
          call this%sync(A,n)
       end do
    end subroutine relax
-   
-   
+
+
    !> Solve directly the problem at the final level
    subroutine direct_solve(this)
       use parallel, only: MPI_REAL_WP
@@ -925,8 +921,8 @@ contains
       ! Synchronize solution
       call this%sync(this%lvl(this%nlvl)%v,this%nlvl)
    end subroutine direct_solve
-   
-   
+
+
    !> Update of the operators across all levels
    !> This routine assumes that the level(1) opr has been populated in the interior
    subroutine update(this)
@@ -960,8 +956,8 @@ contains
       ! Recompute direct problem
       call this%recompute_direct
    end subroutine update
-   
-   
+
+
    !> Recompute prolongation
    subroutine recompute_prolongation(this,n)
       implicit none
@@ -1195,8 +1191,8 @@ contains
       ! Synchronize prolongation
       call this%sync(this%lvl(n)%c2f,n)
    end subroutine recompute_prolongation
-   
-   
+
+
    !> Recompute restriction
    subroutine recompute_restriction(this,n)
       implicit none
@@ -1229,8 +1225,8 @@ contains
       ! Synchronize restriction
       call this%sync(this%lvl(n)%f2c,n)
    end subroutine recompute_restriction
-   
-   
+
+
    !> Recompute operator
    subroutine recompute_operator(this,n)
       implicit none
@@ -1301,8 +1297,8 @@ contains
       ! Synchronize operator
       call this%sync(this%lvl(n)%opr,n)
    end subroutine recompute_operator
-   
-   
+
+
    ! Recompute direct problem
    subroutine recompute_direct(this)
       use parallel, only: MPI_REAL_WP
@@ -1383,7 +1379,7 @@ contains
       ! Gather operator
       call MPI_allreduce(this%myOP,this%OP,this%np*this%np,MPI_REAL_WP,MPI_SUM,this%comm,ierr)
    end subroutine recompute_direct
-   
+
    !> Synchronization of overlap cells for a vector
    subroutine vsync(this,A,n)
       use parallel, only: MPI_REAL_WP
@@ -1552,8 +1548,8 @@ contains
       ! Deallocate
       deallocate(buf1,buf2,request)
    end subroutine vsync
-   
-   
+
+
    !> Synchronization of overlap cells for a matrix
    subroutine msync(this,A,n)
       use parallel, only: MPI_REAL_WP
@@ -1722,6 +1718,6 @@ contains
       ! Deallocate
       deallocate(buf1,buf2,request)
    end subroutine msync
-   
-   
+
+
 end module bbmg_class

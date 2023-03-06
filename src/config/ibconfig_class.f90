@@ -5,35 +5,35 @@ module ibconfig_class
    use config_class, only: config
    implicit none
    private
-   
+
    ! Expose type/constructor/methods
    public :: ibconfig
-   
+
    ! List of known available methods for calculating VF from G
    integer, parameter, public :: bigot=1
    integer, parameter, public :: sharp=2
-   
+
    !> Config object definition as an extension of config
    type, extends(config) :: ibconfig
-      
+
       real(WP), dimension(:,:,:),   allocatable :: Gib             !< Level set function, negative in fluid and positive in solid
       real(WP), dimension(:,:,:,:), allocatable :: Nib             !< IB normal vector, oriented into the solid
-      
+
    contains
       procedure :: calculate_normal          !< Calculate robustly the normal vector from G field
       procedure :: calculate_vf              !< Calculate fluid volume fraction
    end type ibconfig
-   
-   
+
+
    !> Declare single-grid ibconfig constructor
    interface ibconfig
       procedure construct_from_sgrid
    end interface ibconfig
-   
-   
+
+
 contains
-   
-   
+
+
    !> Single-grid config constructor from a serial grid
    function construct_from_sgrid(grp,decomp,grid) result(self)
       use sgrid_class, only: sgrid
@@ -50,8 +50,8 @@ contains
       allocate(self%Gib(    self%imino_:self%imaxo_,self%jmino_:self%jmaxo_,self%kmino_:self%kmaxo_)); self%Gib=-1.0_WP
       allocate(self%Nib(1:3,self%imino_:self%imaxo_,self%jmino_:self%jmaxo_,self%kmino_:self%kmaxo_)); self%Nib=+0.0_WP
    end function construct_from_sgrid
-   
-   
+
+
    !> Specialized normal vector calculation from G
    !> Well suited to handle G discontinuities
    subroutine calculate_normal(this)
@@ -118,8 +118,8 @@ contains
          end if
       end if
    end subroutine calculate_normal
-   
-   
+
+
    !> Calculation of VF from G
    subroutine calculate_vf(this,method,allow_zero_vf)
       use messager, only: die
@@ -127,7 +127,7 @@ contains
       class(ibconfig), intent(inout) :: this
       integer, intent(in) :: method
       logical, intent(in), optional :: allow_zero_vf
-      
+
       ! Select the method
       select case (method)
       case(bigot)
@@ -157,7 +157,7 @@ contains
             do k=this%kmino_,this%kmaxo_
                do j=this%jmino_,this%jmaxo_
                   do i=this%imino_,this%imaxo_
-				         n=0
+                     n=0
                      do sk=0,1
                         do sj=0,1
                            do si=0,1
@@ -177,12 +177,12 @@ contains
       case default
          call die('[ibconfig calculate_vf] Unknown method to calculate VF')
       end select
-      
+
       ! Check if VF=0 is allowed
       if (present(allow_zero_vf)) then
          if (.not.allow_zero_vf) this%VF=max(this%VF,epsilon(1.0_WP))
       end if
-      
+
       ! Update total fluid volume
       call this%calc_fluid_vol()
 
