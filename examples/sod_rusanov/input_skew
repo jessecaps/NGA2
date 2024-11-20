@@ -1,0 +1,21 @@
+# Parallelization
+Partition :	2 2 1
+
+# Mesh definition
+Lx :	1.0
+nx :	64
+Ly :	1.0
+ny :	64
+
+# Mesh Angle
+Mesh angle : 35.0
+
+# Initialization
+Initial x velocity : 0.0
+
+# Time integration
+Max cfl number :    0.98
+
+# Ensight output
+Ensight output period : 0.01
+
