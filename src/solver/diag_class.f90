@@ -468,25 +468,21 @@ contains
    !> TriDiagonal Solver - Serial Case - Not Periodic
    subroutine tridiagonal_serial(a,b,c,r,n,lot)
       implicit none
-      
       integer, intent(in) :: n,lot
       real(WP), intent(inout), dimension(lot,n) :: a,b,c,r
       real(WP), dimension(lot) :: const
       integer :: i
-      
       ! Forward elimination
       do i=2,n
-         const(:) = a(:,i)/(b(:,i-1)+tiny(1.0_WP))
+         const(:) = a(:,i)/(b(:,i-1)+epsilon(1.0_WP))
          b(:,i) = b(:,i) - c(:,i-1)*const(:)
          r(:,i) = r(:,i) - r(:,i-1)*const(:)
       end do
-      
       ! Back-substitution
       r(:,n) = r(:,n)/b(:,n)
       do i=n-1,1,-1
-         r(:,i) = (r(:,i) - c(:,i)*r(:,i+1))/(b(:,i)+tiny(1.0_WP))
+         r(:,i) = (r(:,i) - c(:,i)*r(:,i+1))/(b(:,i)+epsilon(1.0_WP))
       end do
-      
    end subroutine tridiagonal_serial
    
    
@@ -837,6 +833,7 @@ contains
    
    ! ================================================= !
    ! PentaDiagonal Solver - Serial Case - Not periodic !
+   ! We probably need to replace tiny with epsilons    !
    ! ================================================= !
    subroutine pentadiagonal_serial(A,B,C,D,E,R,n,lot)
       implicit none
