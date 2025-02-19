@@ -870,10 +870,14 @@ contains
          corr=1.0_WP+0.15_WP*Re**(0.687_WP)
       case('Tenneti')
          ! Tenneti and Subramaniam (2011)
-         Re=fFV*frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
+         Re=fVF*frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
          b1=5.81_WP*pVF/fVF**3+0.48_WP*pVF**(1.0_WP/3.0_WP)/fVF**4
          b2=pVF**3*Re*(0.95_WP+0.61_WP*pVF**3/fVF**2)
          corr=fVF*((1.0_WP+0.15_WP*Re**(0.687_WP))/fVF**3+b1+b2)
+      case('Beetstra')
+         ! Beetstra et al. (2007)
+         Re=fVF*frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
+         corr=fVF*(10.0_WP*pVF/fVF**2+fVF**2*(1.0_WP+1.5_WP*sqrt(pVF))+0.413_WP*Re/(24.0_WP*fVF**2)*((1.0_WP/fVF+3.0_WP*pVF*fVF+8.4_WP*Re**(-0.343_WP))/(1.0_WP+10.0_WP**(3.0_WP*pVF)*Re**(-0.5_WP*(1.0_WP+4.0_WP*pVF)))))
       case default
          corr=1.0_WP
       end select
