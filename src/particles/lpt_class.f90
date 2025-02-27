@@ -877,7 +877,25 @@ contains
       case('Beetstra')
          ! Beetstra et al. (2007)
          Re=fVF*frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
-         corr=fVF*(10.0_WP*pVF/fVF**2+fVF**2*(1.0_WP+1.5_WP*sqrt(pVF))+0.413_WP*Re/(24.0_WP*fVF**2)*((1.0_WP/fVF+3.0_WP*pVF*fVF+8.4_WP*Re**(-0.343_WP))/(1.0_WP+10.0_WP**(3.0_WP*pVF)*Re**(-0.5_WP*(1.0_WP+4.0_WP*pVF)))))
+         b1 = 10.0_WP*pVF/fVF**2 + fVF**2 * (1.0_WP+1.5_WP*sqrt(pVF))
+         b2 = 0.413_WP/24.0_WP*Re/fVF**2*(1.0_WP/fVF+3.0_WP*fVF*pVF+8.4_WP*Re**(-0.343_WP))/(1.0_WP+10.0_WP**(3.0_WP*pVF)*Re**(2.0_WP*fVF-2.5_WP))
+         corr = b1 + b2
+      case('Gidaspow')
+         ! Gidaspow (1994)
+         Re=frho*norm2(p%vel-fvel)*p%d/fvisc+epsilon(1.0_WP)
+         if(fVF.gt.0.8_WP) then
+            ! Wen & Yu
+            if(Re.lt.1000.0_WP) then
+               b1 = 1.0_WP+0.15_WP*Re**(0.687_WP)
+            else
+               b1 = 0.44_WP
+            end if
+            corr = b1*fVF**(-2.65_WP)
+         else
+            b1 = (150.0_WP*pVF*fvisc)/(fVF*p%d**2)
+            b2 = (1.75_WP*frho*sqrt((p%vel-fvel)**2)/p%d
+            corr = (b1 + b2)*(p%d**2/(18.0_WP*fvisc*fVF))
+         end if
       case default
          corr=1.0_WP
       end select

@@ -109,7 +109,7 @@ contains
       use messager, only: die
       implicit none
       class(ddadi), intent(inout) :: this
-      integer :: i,j,k,st
+      integer :: i,j,k
       
       ! Update DDADI operators
       this%dsol%Ax=0.0_WP
@@ -118,11 +118,9 @@ contains
       do k=this%cfg%kmin_,this%cfg%kmax_
          do j=this%cfg%jmin_,this%cfg%jmax_
             do i=this%cfg%imin_,this%cfg%imax_
-               do st=1,this%nst
-                  this%dsol%Ax(j,k,i,this%stc(st,1))=this%dsol%Ax(j,k,i,this%stc(st,1))+this%opr(st,i,j,k)
-                  this%dsol%Ay(i,k,j,this%stc(st,2))=this%dsol%Ay(i,k,j,this%stc(st,2))+this%opr(st,i,j,k)
-                  this%dsol%Az(i,j,k,this%stc(st,3))=this%dsol%Az(i,j,k,this%stc(st,3))+this%opr(st,i,j,k)
-               end do
+               this%dsol%Ax(j,k,i,:)=this%opr(this%stmap(:,0,0),i,j,k)
+               this%dsol%Ay(i,k,j,:)=this%opr(this%stmap(0,:,0),i,j,k)
+               this%dsol%Az(i,j,k,:)=this%opr(this%stmap(0,0,:),i,j,k)
             end do
          end do
       end do
@@ -158,7 +156,7 @@ contains
       do k=this%cfg%kmin_,this%cfg%kmax_
          do j=this%cfg%jmin_,this%cfg%jmax_
             do i=this%cfg%imin_,this%cfg%imax_
-               this%dsol%Ry(i,k,j)=this%dsol%Rx(j,k,i)*sum(this%opr(:,i,j,k))
+               this%dsol%Ry(i,k,j)=this%dsol%Rx(j,k,i)*this%opr(this%stmap(0,0,0),i,j,k)
             end do
          end do
       end do
@@ -168,7 +166,7 @@ contains
       do k=this%cfg%kmin_,this%cfg%kmax_
          do j=this%cfg%jmin_,this%cfg%jmax_
             do i=this%cfg%imin_,this%cfg%imax_
-               this%dsol%Rz(i,j,k)=this%dsol%Ry(i,k,j)*sum(this%opr(:,i,j,k))
+               this%dsol%Rz(i,j,k)=this%dsol%Ry(i,k,j)*this%opr(this%stmap(0,0,0),i,j,k)
             end do
          end do
       end do
