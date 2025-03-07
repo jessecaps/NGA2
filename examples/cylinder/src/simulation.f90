@@ -35,6 +35,7 @@ module simulation
    real(WP), dimension(:,:,:), allocatable :: resU,resV,resW
    real(WP), dimension(:,:,:), allocatable :: Ui,Vi,Wi
    real(WP), dimension(:,:,:), allocatable :: Uib,Vib,Wib,srcM
+   real(WP), dimension(:,:,:,:), allocatable :: vort
    
    
 contains
@@ -82,6 +83,7 @@ contains
          allocate(Vib (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(Wib (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
          allocate(srcM(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
+         allocate(vort(3,cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block allocate_work_arrays
       
       
@@ -212,6 +214,7 @@ contains
          ! Compute divergence
          resU=srcM/fs%rho           !< Careful, we need to provide
          call fs%get_div(src=resU)  !< a volume source term to div
+         call fs%get_vorticity(vort)!< compute vorticity for visualization
       end block initialize_velocity
       
       
@@ -225,6 +228,7 @@ contains
          ! Add variables to output
          call ens_out%add_particle('particles',pmesh)
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
+         call ens_out%add_vector('vorticity',vort(1,:,:,:),vort(2,:,:,:),vort(3,:,:,:))
          call ens_out%add_scalar('pressure',fs%P)
          call ens_out%add_scalar('Gib',cfg%Gib)
          ! Output to ensight
@@ -382,9 +386,10 @@ contains
          
          ! Recompute interpolated velocity and divergence
          call fs%interp_vel(Ui,Vi,Wi)
-         resU=srcM/fs%rho           !< Careful, we need to provide
-         call fs%get_div(src=resU)  !< a volume source term to div
-         call fs%get_div()  !< a volume source term to div
+         resU=srcM/fs%rho            !< Careful, we need to provide
+         call fs%get_div(src=resU)   !< a volume source term to div
+         call fs%get_div()           !< a volume source term to div
+         call fs%get_vorticity(vort) !< Compute vorticity for visualization
 
          ! Output to ensight
          if (ens_evt%occurs()) then
