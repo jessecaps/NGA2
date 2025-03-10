@@ -1228,6 +1228,11 @@ contains
     filter_coeff=max(this%filter_width**2-this%cfg%min_meshsize**2,0.0_WP)/(16.0_WP*log(2.0_WP))
     if (filter_coeff.le.0.0_WP) return
 
+    ! Allocate flux arrays
+    allocate(FX(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
+    allocate(FY(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
+    allocate(FZ(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
+
     if (this%implicit_filter) then  !< Apply filter implicitly
        if (.not.this%implicit%setup_done) then
           ! Prepare diffusive operator (only need to do this once)
@@ -1250,19 +1255,31 @@ contains
              end do
           end do
        end if
-       ! Solve the linear system
+       ! Explicit step
+       do k=this%cfg%kmin_,this%cfg%kmax_+1
+          do j=this%cfg%jmin_,this%cfg%jmax_+1
+             do i=this%cfg%imin_,this%cfg%imax_+1
+                FX(i,j,k)=filter_coeff*sum(this%grd_x(:,i,j,k)*A(i-1:i,j,k))
+                FY(i,j,k)=filter_coeff*sum(this%grd_y(:,i,j,k)*A(i,j-1:j,k))
+                FZ(i,j,k)=filter_coeff*sum(this%grd_z(:,i,j,k)*A(i,j,k-1:k))
+             end do
+          end do
+       end do
+       do k=this%cfg%kmin_,this%cfg%kmax_
+          do j=this%cfg%jmin_,this%cfg%jmax_
+             do i=this%cfg%imin_,this%cfg%imax_
+                this%implicit%rhs(i,j,k)=sum(this%div_x(:,i,j,k)*FX(i:i+1,j,k))+sum(this%div_y(:,i,j,k)*FY(i,j:j+1,k))+sum(this%div_z(:,i,j,k)*FZ(i,j,k:k+1))
+             end do
+          end do
+       end do
+       ! Implicit step
        call this%implicit%setup()
-       this%implicit%rhs=A
        this%implicit%sol=0.0_WP
        call this%implicit%solve()
-       A=this%implicit%sol
+       A=A+this%implicit%sol
        call this%cfg%sync(A)
        
     else  !< Apply filter explicitly
-       ! Allocate flux arrays
-       allocate(FX(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-       allocate(FY(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-       allocate(FZ(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
        nstep=ceiling(6.0_WP*filter_coeff/this%cfg%min_meshsize**2)
        filter_coeff=filter_coeff/real(nstep,WP)
        do n=1,nstep
@@ -1287,9 +1304,10 @@ contains
           ! Sync A
           call this%cfg%sync(A)
        end do
-       ! Deallocate flux arrays
-       deallocate(FX,FY,FZ)
     end if
+
+    ! Deallocate flux arrays
+    deallocate(FX,FY,FZ)
 
   end subroutine filter
 
