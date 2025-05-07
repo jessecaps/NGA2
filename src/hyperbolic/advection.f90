@@ -5,20 +5,22 @@
 !> Originally written by John P Wakefield in December 2022.
 
 module hyperbolic_advection
-  use precision,    only: WP
-  use string,       only: str_medium
-  use config_class, only: config
-  use hyperbolic,   only: eigenvals_ftype, rsolver_ftype, limiter_ftype
-  use muscl_class,  only: muscl
+  use precision,     only: WP
+  use string,        only: str_medium
+  use config_class,  only: config
+  use hyperbolic,    only: eigenvals_ftype, rsolver_ftype, limiter_ftype, flux_ftype
+  use muscl_class,   only: muscl
+  use rusanov_class, only: rusanov
   implicit none
 
   real(WP), parameter :: advec_muscl_cflsafety = 0.99_WP
   real(WP), parameter :: advec_muscl_divzero_eps = 1e-12_WP
-  character(len=str_medium), parameter :: advec_muscl_name = 'MUSCL_CONST_ADVEC'
+  character(len=str_medium), parameter :: ADVEC_MUSCL_NAME = 'MUSCL_CONST_ADVEC'
+  character(len=str_medium), parameter :: ADVEC_RUS_NAME = 'RUSANOV_CONST_ADVEC'
 
 contains
 
-  !> factory
+  !> muscl factory
   function make_advec_muscl(cfg, N, limiter, velocity) result(solver)
     implicit none
     type(muscl) :: solver
@@ -31,7 +33,7 @@ contains
     procedure(rsolver_ftype), pointer :: rsolv_x_ptr, rsolv_y_ptr, rsolv_z_ptr
     integer :: i
 
-    name_actual = advec_muscl_name
+    name_actual = ADVEC_MUSCL_NAME
 
     evals_x_ptr => advec_evals_x; rsolv_x_ptr => advec_rsolv_x;
     evals_y_ptr => advec_evals_y; rsolv_y_ptr => advec_rsolv_y;
@@ -53,6 +55,37 @@ contains
     solver%vel_mask_z(:) = .false.
 
   end function make_advec_muscl
+
+  !> rusanov factory
+  function make_advec_rusanov(cfg, N, velocity) result(solver)
+    implicit none
+    type(rusanov) :: solver
+    class(config), target, intent(in) :: cfg
+    integer, intent(in) :: N
+    real(WP), dimension(3), intent(in) :: velocity
+    procedure(eigenvals_ftype), pointer :: evals_x_ptr, evals_y_ptr, evals_z_ptr
+    procedure(flux_ftype), pointer :: flux_x_ptr, flux_y_ptr, flux_z_ptr
+    integer :: i
+
+    evals_x_ptr => advec_evals_x; flux_x_ptr => advec_flux_x;
+    evals_y_ptr => advec_evals_y; flux_y_ptr => advec_flux_y;
+    evals_z_ptr => advec_evals_z; flux_z_ptr => advec_flux_z;
+
+    ! build solver
+    solver = rusanov(cfg, ADVEC_RUS_NAME, N, 3, evals_x_ptr, evals_y_ptr,     &
+      & evals_z_ptr, flux_x_ptr, flux_y_ptr, flux_z_ptr)
+
+    ! put velocity in param array
+    do i = 1, 3
+      solver%params(i,:,:,:) = velocity(i)
+    end do
+
+    ! set velocity mask
+    solver%vel_mask_x(:) = .false.
+    solver%vel_mask_y(:) = .false.
+    solver%vel_mask_z(:) = .false.
+
+  end function make_advec_rusanov
 
   pure subroutine advec_evals_x(P, N, params, U, evals)
     implicit none
@@ -95,6 +128,39 @@ contains
     evals(:) = params(3)
 
   end subroutine advec_evals_z
+
+  pure subroutine advec_flux_x(P, N, params, U, flux)
+    implicit none
+    integer, intent(in) :: P, N
+    real(WP), dimension(P), intent(in) :: params
+    real(WP), dimension(N), intent(in) :: u
+    real(WP), dimension(N), intent(out) :: flux
+
+    flux(:) = params(1) * U(:)
+
+  end subroutine advec_flux_x
+
+  pure subroutine advec_flux_y(P, N, params, U, flux)
+    implicit none
+    integer, intent(in) :: P, N
+    real(WP), dimension(P), intent(in) :: params
+    real(WP), dimension(N), intent(in) :: u
+    real(WP), dimension(N), intent(out) :: flux
+
+    flux(:) = params(2) * U(:)
+
+  end subroutine advec_flux_y
+
+  pure subroutine advec_flux_z(P, N, params, U, flux)
+    implicit none
+    integer, intent(in) :: P, N
+    real(WP), dimension(P), intent(in) :: params
+    real(WP), dimension(N), intent(in) :: u
+    real(WP), dimension(N), intent(out) :: flux
+
+    flux(:) = params(3) * U(:)
+
+  end subroutine advec_flux_z
 
   pure subroutine advec_rsolv_simple(v, Ul, Ur, rs)
     real(WP), intent(in) :: v

@@ -1,5 +1,5 @@
-f90EXE_sources += hyperbolic_general.f90 muscl_class.f90 advection.f90 euler.f90
-# houssem2d.f90 rusanov_class.f90
+f90EXE_sources += hyperbolic_general.f90 muscl_class.f90 advection.f90 euler.f90 rusanov_class.f90
+# houssem2d.f90
 
 INCLUDE_LOCATIONS += $(NGA_HOME)/src/hyperbolic
 VPATH_LOCATIONS   += $(NGA_HOME)/src/hyperbolic

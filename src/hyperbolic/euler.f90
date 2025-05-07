@@ -10,7 +10,7 @@ module hyperbolic_euler
   use config_class,  only: config
   use hyperbolic,    only: VANLEER, eigenvals_ftype, rsolver_ftype, limiter_ftype, flux_ftype
   use muscl_class,   only: muscl
-  !use rusanov_class, only: rusanov
+  use rusanov_class, only: rusanov
   implicit none
 
   real(WP), parameter :: euler_muscl_cflsafety = 0.92_WP
@@ -72,41 +72,38 @@ contains
   end function make_euler_muscl
 
   !> rusanov factory
-  !function make_euler_rusanov(cfg, gma) result(solver)
-  !  implicit none
-  !  type(rusanov) :: solver
-  !  class(config), target, intent(in) :: cfg
-  !  real(WP), optional, intent(in) :: gma
-  !  real(WP) :: gma_actual
-  !  procedure(eigenvals_ftype), pointer :: evals_x_ptr, evals_y_ptr, evals_z_ptr
-  !  procedure(flux_ftype), pointer :: flux_x_ptr, flux_y_ptr, flux_z_ptr
+  function make_euler_rusanov(cfg, gma) result(solver)
+    implicit none
+    type(rusanov) :: solver
+    class(config), target, intent(in) :: cfg
+    real(WP), optional, intent(in) :: gma
+    real(WP) :: gma_actual
+    procedure(eigenvals_ftype), pointer :: evals_x_ptr, evals_y_ptr, evals_z_ptr
+    procedure(flux_ftype), pointer :: flux_x_ptr, flux_y_ptr, flux_z_ptr
 
-  !  if (present(gma)) then
-  !    gma_actual = gma
-  !  else
-  !    gma_actual = DIATOMIC_GAMMA
-  !  end if
+    if (present(gma)) then
+      gma_actual = gma
+    else
+      gma_actual = DIATOMIC_GAMMA
+    end if
 
-  !  evals_x_ptr => euler_evals_x
-  !  evals_y_ptr => euler_evals_y
-  !  evals_z_ptr => euler_evals_z
-  !  flux_x_ptr => euler_flux_x
-  !  flux_y_ptr => euler_flux_y
-  !  flux_z_ptr => euler_flux_z
+    evals_x_ptr => euler_evals_x; flux_x_ptr => euler_flux_x;
+    evals_y_ptr => euler_evals_y; flux_y_ptr => euler_flux_y;
+    evals_z_ptr => euler_evals_z; flux_z_ptr => euler_flux_z;
 
-  !  ! build solver
-  !  solver = rusanov(cfg, 'EULER_RUSANOV', 5, 1, evals_x_ptr, evals_y_ptr,    &
-  !    & evals_z_ptr, flux_x_ptr, flux_y_ptr, flux_z_ptr)
+    ! build solver
+    solver = rusanov(cfg, 'EULER_RUSANOV', 5, 1, evals_x_ptr, evals_y_ptr,    &
+      & evals_z_ptr, flux_x_ptr, flux_y_ptr, flux_z_ptr)
 
-  !  ! set param array to hold gamma
-  !  solver%params(1,:,:,:) = gma_actual
+    ! set param array to hold gamma
+    solver%params(1,:,:,:) = gma_actual
 
-  !  ! set velocity mask
-  !  solver%vel_mask_x(:) = (/ .false., .true., .false., .false., .false. /)
-  !  solver%vel_mask_y(:) = (/ .false., .false., .true., .false., .false. /)
-  !  solver%vel_mask_z(:) = (/ .false., .false., .false., .true., .false. /)
+    ! set velocity mask
+    solver%vel_mask_x(:) = (/ .false., .true., .false., .false., .false. /)
+    solver%vel_mask_y(:) = (/ .false., .false., .true., .false., .false. /)
+    solver%vel_mask_z(:) = (/ .false., .false., .false., .true., .false. /)
 
-  !end function make_euler_rusanov
+  end function make_euler_rusanov
 
   !> Convert to Physical Coordinates (velocity and pressure to momentum and energy)
   pure subroutine euler_tophys(gma, cons, phys)
@@ -150,7 +147,8 @@ contains
     real(WP), dimension(N), intent(out) :: flux
     real(WP) :: pressure
 
-    pressure = (params(1) - 1.0_WP) * (U(3) - 0.5_WP * U(2)**2 / U(1))
+    pressure = (params(1) - 1.0_WP) * (U(5) - 0.5_WP * (U(2)**2 + U(3)**2 +   &
+      U(4)**2)/ U(1))
 
     flux(1) = U(2)
     flux(2) = U(2)**2 / U(1) + pressure
