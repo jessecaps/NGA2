@@ -1,0 +1,58 @@
+Drag / pressure model
+
+Where the code computes drag on particle(s). Is it using a local volume fraction + Ergun-like expression or a simple Stokes/Roscoe drag?
+
+If Ergun: confirm how epsp or VF is computed and whether multi-sphere bodies are counted once or by sub-spheres.
+
+Multi-sphere bodies
+
+How are grouped spheres created and flagged as a single rigid body? (look for arrays assigning a body id or code that assembles sub-spheres)
+
+Are hydrodynamic forces summed across component spheres (correct) or treated individually incorrectly?
+
+Collision model
+
+tau_col, stiffness/damping or soft-sphere parameters, restitution e_n, friction mu_f.
+
+Are collisions integrated explicitly or with sub-stepping?
+
+Coupling & filtering
+
+update_VF() and filter_width usage — check filter scale (3.5*dx earlier).
+
+How source terms are spread to grid (itpr_x/y/z) and whether they are normalized.
+
+Pressure solver
+
+Where Poisson RHS is formed: check if solid-phase volume fraction is included correctly (Ergun-based pressure gradient implementation lives here or in lpt advance).
+
+Boundary & initial conditions
+
+Inflow velocity, bed initialization, particle placement (random vs packed), wall treatments.
+
+
+____________________________________
+Medium changes (small Fortran edits)
+	Replace/augment drag law:
+	Add Ergun-based pressure drop for packed regions: ΔP/L=(150μ(1-ε)^2)/(ε^3 d_p^2 ) U+(1.75ρ(1-ε))/(ε^3 d_p ) U^2
+	Implement logic to compute local permeability/Ergun force and add to particle acceleration.
+	Multi-sphere accounting: ensure when evaluating solids fraction VF the grouped body counts once (or correct effective area/porosity of the group).
+	Add lubrication force correction for near-contact hydrodynamics.
+Major changes (if needed)
+	Implement a different coupling frequency (subcycling LPT vs fluid), or a semi-implicit LPT-fluid coupling.
+	Replace pressure solver options (HYPRE config) if needed for stability.
+________________________________________
+
+1) Likely causes (short)
+
+Pressure model vs flow dimensionality: your code computes an Ergun pressure based on flow in z and uses that pressure to accelerate particles in x/y (as your prof described). That gives a pressure field, but it doesn't produce lateral fluid velocity unless you solve the full 3D fluid flow. The experiment has 3-D lateral flow structures → mismatch.
+
+How multi-sphere bodies are counted in porosity (VF): if each sub-sphere is counted separately when computing local VF, you may overcount solids (or undercount the actual effective porosity of a multi-sphere body), producing wrong Ergun pressure.
+
+Singular behaviour at low porosity: Ergun ∝ (1/ε^3) so if ε→0 locally (e.g. along particle edges) you get huge/invalid pressure unless clipped/regularized.
+
+Hydrodynamic interactions missing: lubrication/added mass/pore flow (Darcy) effects can be important for hollow/polygons.
+
+Filtering length & coupling frequency: too-small filter width or too-infrequent coupling can give noisy/incorrect pressure gradients.
+
+2D vs 3D physics: a 2D approximation may not allow lateral fluid motion that is present experimentally.
