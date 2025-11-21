@@ -43,7 +43,8 @@ module gp_class
      type(ghost), dimension(:), allocatable :: gpy       !< Array of ghost points at Y-face
      type(ghost), dimension(:), allocatable :: gpz       !< Array of ghost points at Z-face
      real(WP), dimension(:,:,:), allocatable :: label    !< Integer array used for labeling ghost/image points
-
+     real(WP), dimension(:,:,:), allocatable :: label_x
+     real(WP), dimension(:,:,:), allocatable :: label_y
    contains
 
      procedure :: update                                 !< Update ghost point information
@@ -83,6 +84,8 @@ contains
 
     ! Allocate label array (0=fluid cell, +1=ghost point, -1=image point)
     allocate(self%label(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%label=0.0_WP
+    allocate(self%label_x(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%label_x=0.0_WP
+    allocate(self%label_y(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%label_y=0.0_WP
 
   end function constructor
 
@@ -290,6 +293,10 @@ contains
     end do
     call this%cfg%syncsum(this%label)
 
+    
+
+    
+
     ! X-face
     !========================================================================================
     ! Identify ghost points
@@ -412,6 +419,15 @@ contains
           end do
        end do
     end do
+
+    this%label_x=0.0_WP
+    do n=1,this%ngpx
+       i=this%gpx(n)%ind(1); j=this%gpx(n)%ind(2); k=this%gpx(n)%ind(3)
+       this%label_x(i,j,k)=+1.0_WP !< Ghost point
+       i=this%gpx(n)%im%ind(1); j=this%gpx(n)%im%ind(2); k=this%gpx(n)%im%ind(3)
+       this%label_x(i,j,k)=-1.0_WP !< Image points
+    end do
+    call this%cfg%syncsum(this%label_x)
 
     ! Y-face
     !========================================================================================
@@ -536,6 +552,15 @@ contains
           end do
        end do
     end do
+
+    this%label_y=0.0_WP
+    do n=1,this%ngpy
+       i=this%gpy(n)%ind(1); j=this%gpy(n)%ind(2); k=this%gpy(n)%ind(3)
+       this%label_y(i,j,k)=+1.0_WP !< Ghost point
+       i=this%gpy(n)%im%ind(1); j=this%gpy(n)%im%ind(2); k=this%gpy(n)%im%ind(3)
+       this%label_y(i,j,k)=-1.0_WP !< Image points
+    end do
+    call this%cfg%syncsum(this%label_y)
 
     ! Z-face
     !========================================================================================

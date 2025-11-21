@@ -22,7 +22,7 @@ module ibconfig_class
    type, extends(config) :: ibconfig
       
       real(WP), dimension(:,:,:),   allocatable :: Gib             !< Level set function, negative in fluid and positive in solid
-      real(WP), dimension(:,:,:,:), allocatable :: Nib             !< IB normal vector, oriented into the solid
+      real(WP), dimension(:,:,:,:), allocatable :: Nib             !< IB normal vector, oriented into the solid !output Nib(1,:,:,:), Nib(2,:,:,:)
       real(WP), dimension(:,:,:),   allocatable :: SD              !< Surface density of wall in the cell
       
    contains
