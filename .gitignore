@@ -93,3 +93,5 @@ examples/*/input*~
 !examples/compressible_taylor_green/dns.tke
 !examples/compressible_taylor_green/plot.me
 !examples/amrcomp_drop/scripts
+nga2_key
+nga2_key.pub
