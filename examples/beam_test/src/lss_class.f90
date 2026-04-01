@@ -674,13 +674,18 @@ contains
       real(WP), intent(inout) :: dt  !< Timestep size over which to advance
       real(WP) :: mu
       integer :: n,ierr
+      real(WP), allocatable :: temp_gd(:,:)
+
+      allocate(temp_gd(this%np_, 3))
+
       !========================================================================================
       ! X-Axis Stretch:
        ! Zero out number of particles removed
       this%np_out=0
       do n=1,this%np_
          ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
+         ! if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
+         this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
       end do
       
       ! Communicate particles
@@ -692,7 +697,8 @@ contains
       mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
       do n=1,this%np_
-         if (this%p(n)%id.gt.-2) this%p(n)%gd(1)=0.001_WP/this%p(n)%dil
+         !if (this%p(n)%id.gt.-2) temp_gd(n,1)=0.001_WP/this%p(n)%dil
+         temp_gd(n,1)=0.001_WP/this%p(n)%dil
       end do
 
       !========================================================================================
@@ -701,8 +707,10 @@ contains
       this%np_out=0
       do n=1,this%np_
          ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
+         ! if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
+         ! if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
+          this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
+          this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
       end do
       
       ! Communicate particles
@@ -714,7 +722,8 @@ contains
       mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
       do n=1,this%np_
-         if (this%p(n)%id.gt.-2) this%p(n)%gd(2)=0.001_WP/this%p(n)%dil
+         !if (this%p(n)%id.gt.-2) temp_gd(n,2)=0.001_WP/this%p(n)%dil
+          temp_gd(n,2)=0.001_WP/this%p(n)%dil
       end do
 
       !========================================================================================
@@ -723,8 +732,10 @@ contains
       this%np_out=0
       do n=1,this%np_
          ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
+         ! if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
+         ! if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
+         this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
+         this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
       end do
       
       ! Communicate particles
@@ -736,16 +747,25 @@ contains
       mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
       do n=1,this%np_
-         if (this%p(n)%id.gt.-2) this%p(n)%gd(3)=0.001_WP/this%p(n)%dil
+         !if (this%p(n)%id.gt.-2) temp_gd(n,3)=0.001_WP/this%p(n)%dil
+         temp_gd(n,3)=0.001_WP/this%p(n)%dil
       end do
 
       ! Put the particle back where it was
       do n=1,this%np_
-         if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
+         !if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
+         this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
       end do
 
       !======================================================================================
 
+      do n=1,this%np_
+         !if (this%p(n)%id.gt.-2) then
+            this%p(n)%gd(1) = temp_gd(n,1)
+            this%p(n)%gd(2) = temp_gd(n,2)
+            this%p(n)%gd(3) = temp_gd(n,3)
+        !end if
+      end do
       ! Now stretch particle for the first time step
 
       do n=1,this%np_
