@@ -40,6 +40,8 @@ module lss_class
       real(WP), dimension(3) :: Afluid       !< Fluid acceleration for particle
       real(WP), dimension(3) :: ipos         !< Initial position
       real(WP), dimension(3) :: displacement !< Displacement
+      real(WP), dimension(3) :: gd         !< 
+      real(WP), dimension(3) :: gb !< 
       real(WP), dimension(6) :: sigma        !< Cauchy stress tensor
       !> MPI_INTEGER data
       integer :: id                          !< ID the object is associated with
@@ -51,7 +53,7 @@ module lss_class
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=2
-   integer           , dimension(part_nblock) :: part_lblock=[28+max_bond,7+max_bond]
+   integer           , dimension(part_nblock) :: part_lblock=[34+max_bond,7+max_bond]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -129,7 +131,7 @@ module lss_class
       procedure :: get_delta                         !< Compute regularized delta function
       procedure :: interpolate                       !< Interpolation routine from mesh=>marker
       procedure :: extrapolate                       !< Extrapolation routine from marker=>mesh
-      ! procedure :: stretch
+      procedure :: stretch
    end type lss
    
    
@@ -172,7 +174,7 @@ contains
       
       ! Set default bonding horizon based on underlying mesh
       self%delta=self%cfg%min_meshsize
-      self%nb=1
+      self%nb=2
       self%min_dist=huge(1.0_WP)
       
       ! Allocate variables
@@ -418,11 +420,11 @@ contains
                               rpos=p2%pos-p1%pos
                               dist=sqrt(dot_product(rpos,rpos))
                               ! compute average G correction for dilitation
-                              ! Gd_vec = (p2%gd + p1%gd)/2.0_WP
+                              Gd_vec = (p2%gd + p1%gd)/2.0_WP
                               
-                              ! Gd_mag = sqrt(1.0_WP/(((rpos(1)/dist)/Gd_vec(1))**2 + ((rpos(2)/dist)/Gd_vec(2))**2 + ((rpos(3)/dist)/Gd_vec(3))**2 ))
+                              Gd_mag = sqrt(1.0_WP/(((rpos(1)/dist)/Gd_vec(1))**2 + ((rpos(2)/dist)/Gd_vec(2))**2 + ((rpos(3)/dist)/Gd_vec(3))**2 ))
                               ! Increment dilatation
-                              p1%dil=p1%dil+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)*(dist-p1%dbond(nb))*p2%vol!*Gd_mag
+                              p1%dil=p1%dil+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)*(dist-p1%dbond(nb))*p2%vol*Gd_mag
                            end if
                         end do
                      end do
@@ -528,11 +530,11 @@ contains
                                  ed    = dist - p1%dbond(nb) * (1.0_WP + p1%dil / 3.0_WP)
                               end if
                               ! Force density 1->2
-                              t12=+wgauss(p1%dbond(nb),this%delta)*(beta/p1%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
+                              ! t12=+wgauss(p1%dbond(nb),this%delta)*(beta/p1%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
                               ! t12=+wgauss(p1%dbond(nb),this%delta)*((3.0_WP*kk - 15.0_WP*mu/3.0_WP)*(p1%dil*p1%dbond(nb)/p1%mw) + 15*mu*dist/p1%mw)*rpos/dist
-                              ! Gd_vec = (p2%gd + p1%gd)/2.0_WP
-                              ! Gd_mag = sqrt(1.0_WP/(((rpos(1)/dist)/Gd_vec(1))**2 + ((rpos(2)/dist)/Gd_vec(2))**2 + ((rpos(3)/dist)/Gd_vec(3))**2 ))
-                              ! t12=+wgauss(p1%dbond(nb),this%delta)*((3.0_WP*kk - 15.0_WP*mu/3.0_WP)*(Gd_mag*p1%dil*p1%dbond(nb)/p1%mw) + (15.0_WP*mu/p1%mw)*(dist - p1%dbond(nb)) )*rpos/dist
+                              Gd_vec = (p2%gd + p1%gd)/2.0_WP
+                              Gd_mag = sqrt(1.0_WP/(((rpos(1)/dist)/Gd_vec(1))**2 + ((rpos(2)/dist)/Gd_vec(2))**2 + ((rpos(3)/dist)/Gd_vec(3))**2 ))
+                              t12=+wgauss(p1%dbond(nb),this%delta)*((3.0_WP*kk - 15.0_WP*mu/3.0_WP)*(Gd_mag*p1%dil*p1%dbond(nb)/p1%mw) + (15.0_WP*mu/p1%mw)*(dist - p1%dbond(nb)) )*rpos/dist
                               ! Particle 2
                               p1%vonMises =p1%vonMises + p1%mw/(wgauss(p1%dbond(nb),this%delta)*5.0_WP) * ((alpha * wgauss(p1%dbond(nb),this%delta) * ed)**2) * p2%vol
                               if (is2D) then
@@ -547,8 +549,8 @@ contains
                                  ed    = dist - p1%dbond(nb) * (1.0_WP + p2%dil / 3.0_WP)
                               end if
                               ! Force density 2->1
-                              t21=-wgauss(p1%dbond(nb),this%delta)*(beta/p2%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
-                              ! t21=-wgauss(p1%dbond(nb),this%delta)*((3.0_WP*kk - 15.0_WP*mu/3.0_WP)*(Gd_mag*p2%dil*p1%dbond(nb)/p2%mw)+ (15.0_WP*mu/p2%mw)*(dist - p1%dbond(nb)) )*rpos/dist                              ! Increment bond force
+                              ! t21=-wgauss(p1%dbond(nb),this%delta)*(beta/p2%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
+                              t21=-wgauss(p1%dbond(nb),this%delta)*((3.0_WP*kk - 15.0_WP*mu/3.0_WP)*(Gd_mag*p2%dil*p1%dbond(nb)/p2%mw)+ (15.0_WP*mu/p2%mw)*(dist - p1%dbond(nb)) )*rpos/dist                              ! Increment bond force
                               p1%Abond=p1%Abond+(t12-t21)*p2%vol/this%rho
                               f = t12-t21
                               p1%sigma(1)=p1%sigma(1) + 0.5_WP*f(1)*rpos(1)*p2%vol
@@ -680,103 +682,106 @@ contains
       
    end subroutine advance
 
-   ! subroutine stretch(this,dt)!,stress_x,stress_y,stress_z)
-   !    use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
-   !    use mathtools, only: Pi
-   !    implicit none
-   !    class(lss), intent(inout) :: this
-   !    real(WP), intent(inout) :: dt  !< Timestep size over which to advance
-   !    real(WP) :: mu
-   !    integer :: n,ierr
-   !    !========================================================================================
-   !    ! X-Axis Stretch:
-   !     ! Zero out number of particles removed
-   !    this%np_out=0
-   !    do n=1,this%np_
-   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
-   !    end do
+   subroutine stretch(this,dt)!,stress_x,stress_y,stress_z)
+      use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
+      use mathtools, only: Pi
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), intent(inout) :: dt  !< Timestep size over which to advance
+      real(WP) :: mu
+      integer :: n,ierr
+      real(WP), dimension(:,:),   allocatable :: temp_gd
+
+      allocate(temp_gd(this%np_, 3))
+      !========================================================================================
+      ! X-Axis Stretch:
+       ! Zero out number of particles removed
+      this%np_out=0
+      do n=1,this%np_
+         ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+          this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
+      end do
       
-   !    ! Communicate particles
-   !    call this%sync()
+      ! Communicate particles
+      call this%sync()
 
-   !    ! Calculate bond force
-   !    call this%get_bond_force()
+      ! Calculate bond force
+      call this%get_bond_force()
 
-   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+      mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
-   !    do n=1,this%np_
-   !       if (this%p(n)%id.gt.-2) this%p(n)%gd(1)=0.001_WP/this%p(n)%dil
-   !    end do
+      do n=1,this%np_
+         temp_gd(n,1)=0.001_WP/this%p(n)%dil
+      end do
 
-   !    !========================================================================================
-   !    ! Y-Axis Stretch:
-   !     ! Zero out number of particles removed
-   !    this%np_out=0
-   !    do n=1,this%np_
-   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
-   !    end do
+      !========================================================================================
+      ! Y-Axis Stretch:
+       ! Zero out number of particles removed
+      this%np_out=0
+      do n=1,this%np_
+         ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+         this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
+         this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
+      end do
       
-   !    ! Communicate particles
-   !    call this%sync()
+      ! Communicate particles
+      call this%sync()
 
-   !    ! Calculate bond force
-   !    call this%get_bond_force()
+      ! Calculate bond force
+      call this%get_bond_force()
 
-   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+      mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
-   !    do n=1,this%np_
-   !       if (this%p(n)%id.gt.-2) this%p(n)%gd(2)=0.001_WP/this%p(n)%dil
-   !    end do
+      do n=1,this%np_
+         temp_gd(n,2)=0.001_WP/this%p(n)%dil
+      end do
 
-   !    !========================================================================================
-   !    ! Z-Axis Stretch:
-   !     ! Zero out number of particles removed
-   !    this%np_out=0
-   !    do n=1,this%np_
-   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
-   !    end do
+      !========================================================================================
+      ! Z-Axis Stretch:
+       ! Zero out number of particles removed
+      this%np_out=0
+      do n=1,this%np_
+         ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+          this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
+          this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
+      end do
       
-   !    ! Communicate particles
-   !    call this%sync()
+      ! Communicate particles
+      call this%sync()
 
-   !    ! Calculate bond force
-   !    call this%get_bond_force()
+      ! Calculate bond force
+      call this%get_bond_force()
 
-   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+      mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
 
-   !    do n=1,this%np_
-   !       if (this%p(n)%id.gt.-2) this%p(n)%gd(3)=0.001_WP/this%p(n)%dil
-   !    end do
+      do n=1,this%np_
+       temp_gd(n,3)=0.001_WP/this%p(n)%dil
+      end do
 
-   !    ! Put the particle back where it was
-   !    do n=1,this%np_
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
-   !    end do
+      ! Put the particle back where it was
+      do n=1,this%np_
+        this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
+      end do
 
-   !    !======================================================================================
+      !======================================================================================
 
-   !    ! Now stretch particle for the first time step
+      ! Now stretch particle for the first time step
 
-   !    do n=1,this%np_
-   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
-   !       if (this%p(n)%id.gt.-2) this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
-   !    end do
+      do n=1,this%np_
+         ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+         this%p(n)%gd=temp_gd(n,:)
+      end do
       
-   !    ! Communicate particles
-   !    call this%sync()
+      ! Communicate particles
+      call this%sync()
 
-   !    ! Calculate bond force
-   !    call this%get_bond_force()
+      ! Calculate bond force
+      call this%get_bond_force()
 
-
+      deallocate(temp_gd)
       
       
-   ! end subroutine stretch
+   end subroutine stretch
 
    !> Update particle volume fraction using our current particles
    subroutine update_VF(this)

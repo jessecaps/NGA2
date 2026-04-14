@@ -473,8 +473,14 @@ module simulation
          ! Load',P_load)
          call param_read('Horizon Ratio',ratio)
          call param_read('Mean Particle Spacing',dist)
+         call param_read('Lx',Lx)
+         Lx = Lx + 3.015_WP * dist
+         call param_read('Lz',Lz)
+         ! print *, Lz
+
          ls%delta = dist*ratio
          print*, "Delta :", ls%delta
+         print*, "Required Bond Horizon Distance :", 3.0_WP*ls%delta
          ! Output some info on stretch
          mu=ls%elastic_modulus/(2.0_WP+2.0_WP*ls%poisson_ratio)
          kk=ls%elastic_modulus/(3.0_WP-6.0_WP*ls%poisson_ratio)
@@ -495,13 +501,22 @@ module simulation
               do p=1,np
                   center_dist = 0.0_WP
                  read(iunit) ls%p(p)%pos(1), ls%p(p)%pos(2), ls%p(p)%pos(3), ls%p(p)%vol
+                 ls%p(p)%id=1
+                 if(ls%p(p)%pos(1)<=epsilon(1.0_WP)) ls%p(p)%id=-2
+                 if(ls%p(p)%pos(1)>=(0.1_WP-epsilon(1.0_WP))) ls%p(p)%id=-1
+                  ls%p(p)%pos(1)=ls%p(p)%pos(1)-Lx/2.0_WP
+                 !  ! print*,  -Lz/2.0_WP
+                 ls%p(p)%pos(3)=ls%p(p)%pos(3)-0.00175_WP
+                 ls%p(p)%ipos=ls%p(p)%pos
+                 ls%p(p)%displacement=0.0_WP
                  ! Set object id and velocity
                  ls%p(p)%gd    = 1.0_WP
                  ls%p(p)%gb    = 1.0_WP
-                 ls%p(p)%id=1
-                 if(ls%p(p)%pos(1)<=epsilon(1.0_WP)) ls%p(p)%id=-2
+                 
                  ls%p(p)%vel=[0.0_WP,0.0_WP,0.0_WP]
-                 if(ls%p(p)%pos(1)>epsilon(1.0_WP)) net_vol=net_vol+ls%p(p)%vol
+                 if(ls%p(p)%id.eq.-1 ) ls%p(p)%vel=[0.01_WP,0.0_WP,0.0_WP]
+
+                 net_vol=net_vol+ls%p(p)%vol
                  ! Zero out force
                  ls%p(p)%Abond=0.0_WP
                  ! Zero out fluid unless end, using this for the load
@@ -555,17 +570,16 @@ module simulation
       create_pmesh: block
          use lss_class, only: max_bond
          integer :: i,n,nbond
-         pmesh=partmesh(nvar=5,nvec=4,name='solid')
+         pmesh=partmesh(nvar=5,nvec=3,name='solid')
          pmesh%varname(1)='failfrac'
          pmesh%varname(2)='dilatation'
          pmesh%varname(3)='id'
          pmesh%varname(4)='nbond'
-         pmesh%varname(5)='ste'
+         pmesh%varname(5)='von-Mises'
 
          pmesh%vecname(1)='velocity'
          pmesh%vecname(2)='bond_force'
-         pmesh%vecname(3)='Gd'
-         pmesh%vecname(4)='Gb'
+         pmesh%vecname(3)='disp'
          call ls%update_partmesh(pmesh)
          do i=1,ls%np_
             pmesh%var(1,i)=0.0_WP
@@ -583,9 +597,8 @@ module simulation
             pmesh%vec(:,1,i)=ls%p(i)%vel
             pmesh%vec(:,2,i)=ls%p(i)%Abond
             pmesh%var(4,i)  =ls%p(i)%nbond
-            pmesh%var(5,i)  =ls%p(i)%ste
-            pmesh%vec(:,3,i)  =ls%p(i)%gd
-            pmesh%vec(:,4,i)  =ls%p(i)%gb
+            pmesh%var(5,i)  =ls%p(i)%vonMises
+            pmesh%vec(:,3,i)  =ls%p(i)%displacement
          end do
       end block create_pmesh
 
@@ -708,9 +721,8 @@ module simulation
                  pmesh%vec(:,1,i)=ls%p(i)%vel
                  pmesh%vec(:,2,i)=ls%p(i)%Abond
                  pmesh%var(4,i)  =ls%p(i)%nbond
-                 pmesh%var(5,i)  =ls%p(i)%ste
-                 pmesh%vec(:,3,i)  =ls%p(i)%Gd
-                 pmesh%vec(:,4,i)  =ls%p(i)%Gb
+                 pmesh%var(5,i)  =ls%p(i)%vonMises
+                 pmesh%vec(:,3,i)  =ls%p(i)%displacement
 
 
               end do

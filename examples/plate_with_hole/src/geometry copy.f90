@@ -42,11 +42,10 @@ contains
          ! Ly = Ly + 3.0_WP * dist ! total length of the beam
 
          dx = 3.015_WP*dist ! grid spacing
-         print*, "Grid Spacing : ", dx
 
          nx = ceiling(Lx/dx)+2 ! number of division in x 
          ny = ceiling(Ly/dx) 
-         nz = ceiling(Lz/dx)+2 
+         nz = ceiling(Lz/dx) 
 
          allocate(x(nx+1))
          allocate(y(ny+1))
@@ -60,7 +59,7 @@ contains
             y(j)=real(j-1,WP)*dx - Ly/2.0_WP - 1.5_WP*dist
          end do
          do k=1,nz+1
-            z(k)=real(k-2,WP)*dx - Lz/2.0_WP - 1.5_WP*dist
+            z(k)=real(k-1,WP)*dx - Lz/2.0_WP - 1.5_WP*dist
          end do
          ! General serial grid object (no=3 needed to support ghost/image point interpolation/extrapolation)
          grid=sgrid(coord=cartesian,no=3,x=x,y=y,z=z,xper=.false.,yper=.false.,zper=.false.,name='box')

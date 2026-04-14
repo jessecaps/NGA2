@@ -523,8 +523,8 @@ module simulation
                     ls%p(p)%ipos=ls%p(p)%pos
                     ls%p(p)%displacement=0.0_WP
                     ls%p(p)%vol    = dist*dist*dist
-                  !   ls%p(p)%gd    = 1.0_WP
-                  !   ls%p(p)%gb    = 1.0_WP
+                    ls%p(p)%gd    = 1.0_WP
+                    ls%p(p)%gb    = 1.0_WP
                     ls%p(p)%id=1
                     if(i.le.3) ls%p(p)%id=-1
                     if(i.ge.nx-2) ls%p(p)%id=-1
@@ -693,22 +693,24 @@ module simulation
            dt_done=0.0_WP
            do while (dt_done.lt.time%dtmid)
               ! Decide the timestep size
-            !   if(first_time) then
-            !     call ls%stretch(dt      =mydt)
-            !     first_time=.false.
-            !     dt_done=dt_done+mydt
-            !   else
-            !    mydt=min(ls_dt,time%dtmid-dt_done)
-            !    !  ! Advance particles
-            !    call ls%advance(dt      =mydt)
-            !    !  ! Increment
-            !    dt_done=dt_done+mydt
-            !    end if
-            mydt=min(ls_dt,time%dtmid-dt_done)
-                ! Advance particles
+              if(first_time) then
+                call ls%stretch(dt      =mydt)
+                first_time=.false.
+                dt_done=dt_done+mydt
+              else
+               mydt=min(ls_dt,time%dtmid-dt_done)
+               !  ! Advance particles
                call ls%advance(dt      =mydt)
                !  ! Increment
                dt_done=dt_done+mydt
+               end if
+
+
+            ! mydt=min(ls_dt,time%dtmid-dt_done)
+            !     ! Advance particles
+            !    call ls%advance(dt      =mydt)
+            !    !  ! Increment
+            !    dt_done=dt_done+mydt
               
            end do 
          end block solid

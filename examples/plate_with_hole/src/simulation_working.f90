@@ -295,6 +295,7 @@ module simulation
 
    !> Initialization of problem solver
    subroutine simulation_init
+   
       use param, only: param_read,param_exists
       implicit none
 
@@ -437,7 +438,7 @@ module simulation
 
       initialize_lss: block
          use mpi_f08,  only: MPI_ALLREDUCE,MPI_MAX,MPI_INTEGER
-         real(WP) :: dx,mu,kk,max_stretch,Lx,Ly,Lz
+         real(WP) :: dx,mu,kk,max_stretch,Lx,Ly,Lz,R,x,y,z
          real(WP) :: xmin,xmax,ymin,ymax,zmin,zmax,ratio,dist
          integer :: np,nt,nx,ny,nz,ierr,global_index
          type triangle_type
@@ -469,11 +470,19 @@ module simulation
          ! Discretization
          ! ls%delta=fs%cfg%min_meshsize*1.01
          ! Load',P_load)
-         Lx = 1.0_WP
-         dist = 0.01_WP ! Space between particles
+         call param_read('Lx',Lx)
+         call param_read('Ly',Ly)
+         call param_read('Lz',Lz)
+         call param_read('R',R)
+         call param_read('Solid Spacing',dist)
+         ! Lx = 1.0_WP
+         ! Ly = 1.0_WP
+         ! dist = 0.01_WP ! Space between particles
          Lx = Lx + 3.0_WP * dist
-         ny = 3
-         nz = 3
+         ! Ly = Ly + 3.0_WP * dist
+
+         ny = ceiling(Ly/dist)
+         nz = ceiling(Lz/dist)
          nx = ceiling(Lx/dist)
          call param_read('Horizon Ratio',ratio)
          ls%delta = dist*ratio
@@ -494,27 +503,36 @@ module simulation
               net_vol = 0.0_WP
               global_index = 0
               target_index = 0
-              
               ! Read in grid definition
-              wall_np = (3*ny)*(3*nz)*(nx)
+              wall_np = (ny)*(nz)*(nx)
             !   call ls%resize(np+wall_np)
               call ls%resize(wall_np)
               p=0
               do i=1,nx
-                do j=1,3*ny
-                  do k=1,3*nz
+                do j=1,ny
+                  do k=1,nz
+                    x = (i-1) * dist - Lx/2.0_WP;
+                    y = (j-1) * (dist) - Ly/2.0_WP 
+                    z = (k-1) * (dist) - Lz/2.0_WP - dist
+                    if ((x*x + y*y).lt.R*R) cycle;
                     p = p+1
                     
-                    ls%p(p)%pos(1) = (i-1) * dist - 2.0_WP*dist + epsilon(1.0_WP);
-                    ls%p(p)%pos(2) = (j-1) * (dist) - dist
-                    ls%p(p)%pos(3) = (k-1) * (dist) - dist
+                    ls%p(p)%pos(1) = x
+                    ls%p(p)%pos(2) = y
+                    ls%p(p)%pos(3) = z
+                    ls%p(p)%ipos=ls%p(p)%pos
+                    ls%p(p)%displacement=0.0_WP
                     ls%p(p)%vol    = dist*dist*dist
                     ls%p(p)%gd    = 1.0_WP
                     ls%p(p)%gb    = 1.0_WP
                     ls%p(p)%id=1
-                    if(i.le.3) ls%p(p)%id=-2
+                    if(i.le.3) ls%p(p)%id=-1
+                    if(i.ge.nx-2) ls%p(p)%id=-1
+                    
                     ls%p(p)%vel=[0.0_WP,0.0_WP,0.0_WP]
-                    if(i.gt.3) net_vol=net_vol+ls%p(p)%vol
+                    if(ls%p(p)%id.eq.-1.and.ls%p(p)%pos(1).gt.0) ls%p(p)%vel=[0.01_WP,0.0_WP,0.0_WP]
+                    if(ls%p(p)%id.eq.-1.and.ls%p(p)%pos(1).lt.0) ls%p(p)%id=-2
+                    ! if(i.gt.3) net_vol=net_vol+ls%p(p)%vol
                     ! Zero out force
                     ls%p(p)%Abond=0.0_WP
                     ! Zero out fluid unless end, using this for the load
@@ -567,17 +585,16 @@ module simulation
       create_pmesh: block
          use lss_class, only: max_bond
          integer :: i,n,nbond
-         pmesh=partmesh(nvar=5,nvec=4,name='solid')
+         pmesh=partmesh(nvar=5,nvec=3,name='solid')
          pmesh%varname(1)='failfrac'
          pmesh%varname(2)='dilatation'
          pmesh%varname(3)='id'
          pmesh%varname(4)='nbond'
-         pmesh%varname(5)='ste'
+         pmesh%varname(5)='von-Mises'
 
          pmesh%vecname(1)='velocity'
          pmesh%vecname(2)='bond_force'
-         pmesh%vecname(3)='Gd'
-         pmesh%vecname(4)='Gb'
+         pmesh%vecname(3)='disp'
          call ls%update_partmesh(pmesh)
          do i=1,ls%np_
             pmesh%var(1,i)=0.0_WP
@@ -595,9 +612,8 @@ module simulation
             pmesh%vec(:,1,i)=ls%p(i)%vel
             pmesh%vec(:,2,i)=ls%p(i)%Abond
             pmesh%var(4,i)  =ls%p(i)%nbond
-            pmesh%var(5,i)  =ls%p(i)%ste
-            pmesh%vec(:,3,i)  =ls%p(i)%gd
-            pmesh%vec(:,4,i)  =ls%p(i)%gb
+            pmesh%var(5,i)  =ls%p(i)%vonMises
+            pmesh%vec(:,3,i)  =ls%p(i)%displacement
          end do
       end block create_pmesh
 
@@ -688,6 +704,13 @@ module simulation
                !  ! Increment
                dt_done=dt_done+mydt
                end if
+
+
+            ! mydt=min(ls_dt,time%dtmid-dt_done)
+            !     ! Advance particles
+            !    call ls%advance(dt      =mydt)
+            !    !  ! Increment
+            !    dt_done=dt_done+mydt
               
            end do 
          end block solid
@@ -720,9 +743,8 @@ module simulation
                  pmesh%vec(:,1,i)=ls%p(i)%vel
                  pmesh%vec(:,2,i)=ls%p(i)%Abond
                  pmesh%var(4,i)  =ls%p(i)%nbond
-                 pmesh%var(5,i)  =ls%p(i)%ste
-                 pmesh%vec(:,3,i)  =ls%p(i)%Gd
-                 pmesh%vec(:,4,i)  =ls%p(i)%Gb
+                 pmesh%var(5,i)  =ls%p(i)%vonMises
+                 pmesh%vec(:,3,i)  =ls%p(i)%displacement
 
 
               end do
