@@ -39,8 +39,7 @@ module lss_class
       real(WP), dimension(3) :: ipos         !< Initial position
       real(WP), dimension(3) :: displacement !< Displacement
       real(WP), dimension(3,3) :: F          !< Deformation gradient tensor
-      real(WP), dimension(3,3) :: K_inv      !< Inverse of shape tensor
-      real(WP), dimension(3,3) :: P          !< First Piola-Kirchoff tensor
+      real(WP), dimension(3,3) :: PK_inv     !< First Piola-Kirchoff tensor times shape tensor inverse
       !> MPI_INTEGER data
       integer :: id                          !< ID the object is associated with
       integer :: i                           !< Unique index of particle (assumed >0)
@@ -51,7 +50,7 @@ module lss_class
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=2
-   integer           , dimension(part_nblock) :: part_lblock=[47+max_bond,7+max_bond]
+   integer           , dimension(part_nblock) :: part_lblock=[38+max_bond,7+max_bond]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -388,7 +387,7 @@ contains
          integer :: nb,nbond
          real(WP), dimension(3) :: rpos, xi
          real(WP) :: dist,w,mu,kk,detK
-         real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,traceE,S_mat
+         real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,traceE,S_mat,K_inv
 
          mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio) ! shear modulus
          kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio) ! bulk moduls
@@ -396,6 +395,7 @@ contains
          S_mat = 0.0_WP
          traceE = 0.0_WP
          E_mat = 0.0_WP
+         K_inv = 0.0_WP
          I_mat(1,1) = 1.0_WP
          I_mat(2,2) = 1.0_WP
          I_mat(3,3) = 1.0_WP
@@ -406,8 +406,8 @@ contains
             p1=this%p(n1)
             ! Zero out weighted volume and dilatation
             K_mat=0.0_WP
+            K_inv = 0.0_WP
             p1%F=0.0_WP
-            p1%K_inv=0.0_WP
             ! Loop over neighbor cells
             do k=p1%ind(3)-this%nb,p1%ind(3)+this%nb
                do j=p1%ind(2)-this%nb,p1%ind(2)+this%nb
@@ -448,24 +448,25 @@ contains
             detK = K_mat(1,1)*(K_mat(2,2)*K_mat(3,3)-K_mat(2,3)*K_mat(3,2)) &
                   -K_mat(1,2)*(K_mat(2,1)*K_mat(3,3)-K_mat(2,3)*K_mat(3,1)) &
                   +K_mat(1,3)*(K_mat(2,1)*K_mat(3,2)-K_mat(2,2)*K_mat(3,1))
-            p1%K_inv(1,1) = (K_mat(2,2)*K_mat(3,3) - K_mat(2,3)*K_mat(3,2))/detK
-            p1%K_inv(2,1) = -(K_mat(2,1)*K_mat(3,3) - K_mat(2,3)*K_mat(3,1))/detK
-            p1%K_inv(3,1) = (K_mat(2,1)*K_mat(3,2) - K_mat(2,2)*K_mat(3,1))/detK
-            p1%K_inv(1,2) = -(K_mat(1,2)*K_mat(3,3) - K_mat(1,3)*K_mat(3,2))/detK
-            p1%K_inv(2,2) = (K_mat(1,1)*K_mat(3,3) - K_mat(1,3)*K_mat(3,1))/detK
-            p1%K_inv(3,2) = -(K_mat(1,1)*K_mat(3,2) - K_mat(1,2)*K_mat(3,1))/detK
-            p1%K_inv(1,3) = (K_mat(1,2)*K_mat(2,3) - K_mat(1,3)*K_mat(2,2))/detK
-            p1%K_inv(2,3) = -(K_mat(1,1)*K_mat(2,3) - K_mat(1,3)*K_mat(2,1))/detK
-            p1%K_inv(3,3) = (K_mat(1,1)*K_mat(2,2) - K_mat(1,2)*K_mat(2,1))/detK
+            K_inv(1,1) = (K_mat(2,2)*K_mat(3,3) - K_mat(2,3)*K_mat(3,2))/detK
+            K_inv(2,1) = -(K_mat(2,1)*K_mat(3,3) - K_mat(2,3)*K_mat(3,1))/detK
+            K_inv(3,1) = (K_mat(2,1)*K_mat(3,2) - K_mat(2,2)*K_mat(3,1))/detK
+            K_inv(1,2) = -(K_mat(1,2)*K_mat(3,3) - K_mat(1,3)*K_mat(3,2))/detK
+            K_inv(2,2) = (K_mat(1,1)*K_mat(3,3) - K_mat(1,3)*K_mat(3,1))/detK
+            K_inv(3,2) = -(K_mat(1,1)*K_mat(3,2) - K_mat(1,2)*K_mat(3,1))/detK
+            K_inv(1,3) = (K_mat(1,2)*K_mat(2,3) - K_mat(1,3)*K_mat(2,2))/detK
+            K_inv(2,3) = -(K_mat(1,1)*K_mat(2,3) - K_mat(1,3)*K_mat(2,1))/detK
+            K_inv(3,3) = (K_mat(1,1)*K_mat(2,2) - K_mat(1,2)*K_mat(2,1))/detK
 
 
-            p1%F = MATMUL(p1%F,p1%K_inv)
+            p1%F = MATMUL(p1%F,K_inv)
             
             ! Compute first Piola-Kirchoff stress tensor
             E_mat = 0.5_WP * (MATMUL(TRANSPOSE(p1%F),p1%F)-I_mat)
             traceE = E_mat(1,1) + E_mat(2,2) + E_mat(3,3)
             S_mat = (kk-2.0_WP/3.0_WP*mu)*traceE*I_mat + 2.0_WP*mu*E_mat
-            p1%P = MATMUL(p1%F,S_mat)
+            p1%PK_inv = MATMUL(MATMUL(p1%F,S_mat),K_inv)
+
             ! Copy back the particle
             this%p(n1)=p1
          end do
@@ -545,9 +546,9 @@ contains
                               w = wgauss(p1%dbond(nb),this%delta)
                               xi = p2%ipos-p1%ipos
                               ! Force density 1->2
-                              t1 = w*MATMUL(MATMUL(p1%P,p1%K_inv),xi)                              
+                              t1 = w*MATMUL(p1%PK_inv,xi)                              
                               ! Force density 2->1
-                              t2 = w*MATMUL(MATMUL(p2%P,p2%K_inv),xi)    
+                              t2 = w*MATMUL(p2%PK_inv,xi)    
                               ! Force correction term
                               z = rpos-MATMUL(p1%F,xi)
                               tc = w*(9.0_WP*kk/(Pi * this%delta**4))*(dot_product(xi,z)/(sqrt(dot_product(xi,xi)))**3)*xi       
