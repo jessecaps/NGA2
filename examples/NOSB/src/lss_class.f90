@@ -147,13 +147,13 @@ contains
       real(WP), intent(in) :: d,h
       real(WP), parameter :: coeff=2.6_WP
       real(WP) :: hh
-      hh=coeff*h
+      ! hh=coeff*h
       hh=h
       if (d.ge.hh) then
          wgauss=0.0_WP
       else
          ! wgauss=(1.0_WP+4.0_WP*d/hh)*(1.0_WP-d/hh)**4
-         wgauss=(1.0_WP-d/h)
+         wgauss=(1.0_WP-d/h)**3
       end if
    end function wgauss
    
@@ -174,7 +174,7 @@ contains
       
       ! Set default bonding horizon based on underlying mesh
       self%delta=self%cfg%min_meshsize
-      self%nb=2
+      self%nb=1
       self%min_dist=huge(1.0_WP)
       
       ! Allocate variables
