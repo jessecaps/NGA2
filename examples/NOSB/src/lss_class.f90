@@ -386,8 +386,8 @@ contains
          type(part) :: p1,p2
          integer :: nb,nbond
          real(WP), dimension(3) :: rpos, xi
-         real(WP) :: dist,w,mu,kk,detK
-         real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,traceE,S_mat,K_inv
+         real(WP) :: dist,w,mu,kk,detK,traceE
+         real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,S_mat,K_inv
 
          mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio) ! shear modulus
          kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio) ! bulk moduls
@@ -461,7 +461,7 @@ contains
 
             p1%F = MATMUL(p1%F,K_inv)
             
-            ! Compute first Piola-Kirchoff stress tensor
+            ! Compute first Piola-Kirchoff stress tensor - constitutive model dependent
             E_mat = 0.5_WP * (MATMUL(TRANSPOSE(p1%F),p1%F)-I_mat)
             traceE = E_mat(1,1) + E_mat(2,2) + E_mat(3,3)
             S_mat = (kk-2.0_WP/3.0_WP*mu)*traceE*I_mat + 2.0_WP*mu*E_mat
