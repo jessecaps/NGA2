@@ -486,7 +486,7 @@ module simulation
          dist = Ly/N                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
          ny = N
          nz = N
-         nx = floor(Lx/Ly)*N + 8
+         nx = floor(Lx/Ly)*N+6
          call param_read('Horizon Ratio',ratio)
          ls%delta = dist*ratio
          
@@ -528,12 +528,12 @@ module simulation
                     ls%p(p)%id=1
                     if(i.le.6) ls%p(p)%id=-1
                     ls%p(p)%vel=[0.0_WP,0.0_WP,0.0_WP]
-                     if(i.ge.nx-2) net_vol=net_vol+ls%p(p)%vol
+                     if(i.ge.nx) net_vol=net_vol+ls%p(p)%vol
                     ! Zero out force
                     ls%p(p)%Abond=0.0_WP
                     ! Zero out fluid unless end, using this for the load
                     ls%p(p)%Afluid=0.0_WP
-                    if(i.ge.nx-2) ls%p(p)%Afluid=[(P_load/(dist**3 * ny * nz * 3))/(ls%rho),0.0_WP,0.0_WP]
+                    if(i.ge.nx) ls%p(p)%Afluid=[(P_load/(dist**3 * ny * nz * 1))/(ls%rho),0.0_WP,0.0_WP]
                     ! Locate the particle on the mesh
                     ls%p(p)%ind=ls%cfg%get_ijk_global(ls%p(p)%pos,[ls%cfg%imin,ls%cfg%jmin,ls%cfg%kmin])
                     ! Assign a unique integer to particle
@@ -550,7 +550,7 @@ module simulation
             print*, "Ny: ", ny
             print*, "Nz: ", nz
             print*, "Net Force Volume", net_vol
-            print*, "Used Volume", (dist**3 * ny * nz * 3)
+            print*, "Used Volume", (dist**3 * ny * nz * 1)
             end block read_bin
          end if
 

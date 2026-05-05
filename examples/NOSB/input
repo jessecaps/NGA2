@@ -1,11 +1,11 @@
 # Parallelization
-Partition :	8 1 1
+Partition :	9 1 1
 
 
 # Beam Shape
 Lz :	0.01
 Ly :	0.01
-Lx :	0.1
+Lx :	.1
 R :     0.000
 Particle file: element_data.bin
 

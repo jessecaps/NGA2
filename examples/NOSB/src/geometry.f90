@@ -39,7 +39,7 @@ contains
 
          ! dist = 0.01_WP ! Space between particles
          dist = Ly/N
-         Lx = Lx + 6.03_WP * dist ! total length of the beam
+         Lx = Lx + 3.0_WP*(3.015_WP) * dist ! total length of the beam
          ! Ly = Ly + 3.0_WP * dist ! total length of the beam
 
          dx = 3.015_WP*dist ! grid spacing
