@@ -540,7 +540,7 @@ module simulation
                     ls%p(p)%i=p
                     ! Activate the particle
                     ls%p(p)%flag=0
-                    if(i.eq.(nx/2+2).and.j.eq.(ny/2+1).and.k.eq.(nz/2+1)) target_index = p
+                    if(i.eq.(nx/2+3).and.j.eq.(ny/2+1).and.k.eq.(nz/2+1)) target_index = p
                   end do
                 end do
               end do
@@ -587,11 +587,12 @@ module simulation
       create_pmesh: block
          use lss_class, only: max_bond
          integer :: i,n,nbond
-         pmesh=partmesh(nvar=4,nvec=3,name='solid')
+         pmesh=partmesh(nvar=5,nvec=3,name='solid')
          pmesh%varname(1)='failfrac'
          pmesh%varname(2)='id'
          pmesh%varname(3)='nbond'
          pmesh%varname(4)='von-Mises'
+         pmesh%varname(5)='quadCheck'
  
 
          pmesh%vecname(1)='velocity'
@@ -614,6 +615,7 @@ module simulation
             pmesh%vec(:,2,i)=ls%p(i)%Abond
             pmesh%var(3,i)  =ls%p(i)%nbond
             pmesh%var(4,i)  =ls%p(i)%vonMises
+            pmesh%var(5,i)  =ls%p(i)%quadCheck
             pmesh%vec(:,3,i)  =ls%p(i)%displacement
 
          end do
@@ -745,6 +747,7 @@ module simulation
                  pmesh%vec(:,2,i)=ls%p(i)%Abond
                  pmesh%var(3,i)  =ls%p(i)%nbond
                  pmesh%var(4,i)  =ls%p(i)%vonMises
+                 pmesh%var(5,i)  =ls%p(i)%quadCheck
                  pmesh%vec(:,3,i)  =ls%p(i)%displacement
 
 

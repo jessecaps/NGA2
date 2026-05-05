@@ -31,6 +31,7 @@ module lss_class
       !> MPI_DOUBLE_PRECISION data
       real(WP) :: vonMises                   !< Element dilatation
       real(WP) :: vol                        !< Particle volume
+      real(WP) :: quadCheck
       real(WP), dimension(max_bond) :: dbond !< Length of initial bonds
       real(WP), dimension(3) :: pos          !< Particle center coordinates
       real(WP), dimension(3) :: vel          !< Velocity of particle
@@ -50,7 +51,7 @@ module lss_class
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=2
-   integer           , dimension(part_nblock) :: part_lblock=[38+max_bond,7+max_bond]
+   integer           , dimension(part_nblock) :: part_lblock=[39+max_bond,7+max_bond]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -408,6 +409,7 @@ contains
             K_mat=0.0_WP
             K_inv = 0.0_WP
             p1%F=0.0_WP
+            p1%quadCheck=0.0_WP
             ! Loop over neighbor cells
             do k=p1%ind(3)-this%nb,p1%ind(3)+this%nb
                do j=p1%ind(2)-this%nb,p1%ind(2)+this%nb
@@ -438,6 +440,7 @@ contains
                               p1%F(1,1)=p1%F(1,1)+rpos(1)*xi(1)*w*p2%vol; p1%F(1,2)=p1%F(1,2)+rpos(1)*xi(2)*w*p2%vol; p1%F(1,3)=p1%F(1,3)+rpos(1)*xi(3)*w*p2%vol;
                               p1%F(2,1)=p1%F(2,1)+rpos(2)*xi(1)*w*p2%vol; p1%F(2,2)=p1%F(2,2)+rpos(2)*xi(2)*w*p2%vol; p1%F(2,3)=p1%F(2,3)+rpos(2)*xi(3)*w*p2%vol;
                               p1%F(3,1)=p1%F(3,1)+rpos(3)*xi(1)*w*p2%vol; p1%F(3,2)=p1%F(3,2)+rpos(3)*xi(2)*w*p2%vol; p1%F(3,3)=p1%F(3,3)+rpos(3)*xi(3)*w*p2%vol;
+                              p1%quadCheck = p1%quadCheck + w*p2%vol
                            end if
                         end do
                      end do
