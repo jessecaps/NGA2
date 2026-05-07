@@ -645,7 +645,7 @@ contains
          beta = 0.0_WP
       end if 
       ! Advance velocity based on old force and position based on mid-velocity
-      print*, beta
+      ! print*, beta
       do n=1,this%np_
          if(cool_down.and.this%p(n)%id.eq.-1) this%p(n)%vel = 0.0_WP
          ! Advance with Verlet scheme
