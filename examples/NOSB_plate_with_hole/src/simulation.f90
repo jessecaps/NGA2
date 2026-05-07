@@ -463,7 +463,8 @@ module simulation
          call param_read('Solid density',ls%rho)
          call param_read('Critical Energy Release Rate',ls%crit_energy)
          call param_read('Solid Damping Constant',ls%beta)
-         call param_read('Damping time',ls%damping_time)
+         call param_read('Cool down time',ls%cool_down_time)
+         call param_read('Continuous damping',ls%continuous_damping)
 
          ! Maximum timestep size used for particles
          call param_read('Particle timestep size',ls_dt_max,default=huge(1.0_WP))
@@ -680,9 +681,9 @@ module simulation
     subroutine simulation_run
       implicit none
       real(WP) :: cfl
-      logical :: damping_on
+      logical :: cool_down_time
 
-      damping_on = .false.
+      cool_down_time = .false.
       ! Perform time integration
       do while (.not.time%done())
 
@@ -701,10 +702,10 @@ module simulation
            dt_done=0.0_WP
            do while (dt_done.lt.time%dtmid)
               ! Decide the timestep size
-               if (time%t.gt.ls%damping_time) damping_on = .true.
+               if (time%t.gt.ls%cool_down_time) cool_down_time = .true.
                mydt=min(ls_dt,time%dtmid-dt_done)
                !  ! Advance particles
-                call ls%advance(dt      =mydt,damp = damping_on)
+                call ls%advance(dt      =mydt,cool_down = cool_down_time, continuous = ls%continuous_damping)
                !  ! Increment
                dt_done=dt_done+mydt
 

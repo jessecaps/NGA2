@@ -73,7 +73,8 @@ module lss_class
       real(WP) :: rho                                     !< Density of the material
       real(WP) :: crit_energy                             !< Critical energy release
       real(WP) :: beta                                       !< Damping constant
-      real(WP) :: damping_time                                           
+      real(WP) :: cool_down_time
+      logical  :: continuous_damping                       !< True if you want damping on the whole time                                           
       
       ! Bonding parameters
       real(WP) :: delta                                   !< Bonding horizon (distance)
@@ -622,13 +623,13 @@ contains
    !> p%id=-1 => do not solve for velocity
    !> p%id= 0 => do not update force
    
-   subroutine advance(this,dt,damp)!,stress_x,stress_y,stress_z)
+   subroutine advance(this,dt,cool_down,continuous)!,stress_x,stress_y,stress_z)
       use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
       use mathtools, only: Pi
       implicit none
       class(lss), intent(inout) :: this
       real(WP), intent(inout) :: dt  !< Timestep size over which to advance
-      logical, intent(in) :: damp
+      logical, intent(in) :: cool_down,continuous
       ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_x  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_y  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_z  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
@@ -638,15 +639,15 @@ contains
 
        ! Zero out number of particles removed
       this%np_out=0
-      if(damp) then
+      if(cool_down.or.continuous) then
          beta = this%beta
       else
          beta = 0.0_WP
       end if 
       ! Advance velocity based on old force and position based on mid-velocity
-      ! print*, beta
+      print*, beta
       do n=1,this%np_
-         if(damp.and.this%p(n)%id.eq.-1) this%p(n)%vel = 0.0_WP
+         if(cool_down.and.this%p(n)%id.eq.-1) this%p(n)%vel = 0.0_WP
          ! Advance with Verlet scheme
          if (this%p(n)%id.gt.-1) this%p(n)%vel=(1.0_WP-beta)*this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
          if (this%p(n)%id.gt.-2) this%p(n)%pos=this%p(n)%pos+dt*this%p(n)%vel
