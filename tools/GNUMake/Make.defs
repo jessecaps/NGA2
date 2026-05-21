@@ -155,6 +155,7 @@ DEFINES	  += -DBL_FORT_USE_$(FORTLINK)			\
 CPPFLAGS	  += $(DEFINES)
 
 LDFLAGS    += -L. $(addprefix -L, $(LIBRARY_LOCATIONS))
+LDFLAGS += -Wl,-syslibroot,$(shell xcrun --show-sdk-path)
 ###############################################################
 
 
