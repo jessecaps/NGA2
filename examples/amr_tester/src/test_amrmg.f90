@@ -130,7 +130,7 @@ contains
       ! Solve with zero initial guess
       call phi%setval(val=0.0_WP, lvl=0)
       call tmr%reset(); call tmr%start()
-      call solver%solve(phi=phi, rhs=rhs)
+      call solver%solve(rhs=rhs,phi0=phi)
       call tmr%stop()
       write(msg,'(a,es12.5,a,es12.5,a)') '  Solve: residual = ', solver%res, ', time = ', tmr%time, ' s'
       call log(msg)
@@ -297,14 +297,14 @@ contains
 
       tmr = timer(comm=MPI_COMM_WORLD, name='amrmg_var')
       call tmr%start()
-      call solver%setup(bcoef_x=bcoef_x, bcoef_y=bcoef_y, bcoef_z=bcoef_z)
+      call solver%setup(bcoef_x=bcoef_x%mf, bcoef_y=bcoef_y%mf, bcoef_z=bcoef_z%mf)
       call tmr%stop()
       write(msg,'(a,es12.5,a)') '  Setup time: ', tmr%time, ' s'; call log(msg)
 
       ! First solve
       call phi%setval(val=0.0_WP, lvl=0)
       call tmr%reset(); call tmr%start()
-      call solver%solve(phi=phi, rhs=rhs)
+      call solver%solve(rhs=rhs,phi0=phi)
       call tmr%stop()
       write(msg,'(a,es12.5,a,es12.5,a)') '  First solve: residual = ', solver%res, ', time = ', tmr%time, ' s'
       call log(msg)
@@ -312,7 +312,7 @@ contains
       ! Second solve (reuse test)
       call phi%setval(val=0.0_WP, lvl=0)
       call tmr%reset(); call tmr%start()
-      call solver%solve(phi=phi, rhs=rhs)
+      call solver%solve(rhs=rhs,phi0=phi)
       call tmr%stop()
       write(msg,'(a,es12.5,a,es12.5,a)') '  Second solve (reuse): residual = ', solver%res, ', time = ', tmr%time, ' s'
       call log(msg)
@@ -356,15 +356,15 @@ contains
    end subroutine test_varcoef
 
    !> Tagger: refine where RHS magnitude exceeds threshold
-   subroutine rhs_tagger(ctx, lvl, tags_ptr, time)
+   subroutine rhs_tagger(ctx, lvl, time, tags_ptr)
       use iso_c_binding, only: c_ptr, c_f_pointer, c_char, c_associated
       use amrex_amr_module, only: amrex_tagboxarray, amrex_mfiter, amrex_box
       use amrgrid_class, only: SETtag
       implicit none
       type(c_ptr), intent(in) :: ctx
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrdata), pointer :: rhs
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
@@ -497,7 +497,7 @@ contains
 
       ! Solve
       call tmr%reset(); call tmr%start()
-      call solver%solve(phi=phi, rhs=rhs)
+      call solver%solve(rhs=rhs,phi0=phi)
       call tmr%stop()
       write(msg,'(a,es12.5,a,es12.5,a)') '  Solve: residual = ', solver%res, ', time = ', tmr%time, ' s'
       call log(msg)
@@ -594,7 +594,7 @@ contains
       call log('  Step 1: Composite solve on all levels')
       call tmr%start()
       call solver%setup()
-      call solver%solve(phi=phi, rhs=rhs)
+      call solver%solve(rhs=rhs,phi0=phi)
       call tmr%stop()
       write(msg,'(a,es12.5,a,i0)') '    Composite solve: residual = ', solver%res, ', niter = ', solver%niter
       call log(msg)

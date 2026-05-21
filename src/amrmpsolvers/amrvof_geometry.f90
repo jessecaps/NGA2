@@ -9,10 +9,10 @@ module amrvof_geometry
    public :: tet_map, cut_side, cut_v1, cut_v2, cut_vtet
    public :: cut_ntets, cut_nvert, cut_nntet
    public :: get_plane_dist
-   public :: tet_vol, tet_sign, cut_tet_vol
-   public :: flux_polyhedron_vol, cut_hex_vol
+   public :: tet_vol, tet_sign, poly_area, cut_tet_vol, cut_hex_vol
    public :: correct_flux_poly
-   public :: cut_hex_polygon, hex_poly_nvert, get_hex_poly_nvert
+   public :: cut_hex_polygon, hex_poly_nvert
+   public :: flux_poly_moments
 
    ! Cutting tables from mpcomp_class_noirl
    ! tet_map: maps a hex cell (8 vertices + center) to 8 tetrahedra
@@ -339,7 +339,7 @@ contains
       d = alpha * norm + dot_product(normal, cellctr)
       
    end function get_plane_dist
-   
+
    !> Compute volume of tetrahedron given 4 vertices
    !> v(:,1:4) are the vertex coordinates
    pure function tet_vol(v) result(vol)
@@ -364,6 +364,24 @@ contains
       a=vert(:,1)-vert(:,4); b=vert(:,2)-vert(:,4); c=vert(:,3)-vert(:,4)
       s=sign(1.0_WP,-(a(1)*(b(2)*c(3)-c(2)*b(3))-a(2)*(b(1)*c(3)-c(1)*b(3))+a(3)*(b(1)*c(2)-c(1)*b(2))))
    end function tet_sign
+
+   !> Compute area of a convex polygon with nv vertices via triangle fan
+   !> verts(:,1:nv) are the polygon vertices in cyclic order
+   pure function poly_area(nv,verts) result(area)
+      implicit none
+      integer,  intent(in) :: nv
+      real(WP), dimension(3,nv), intent(in) :: verts
+      real(WP) :: area
+      real(WP), dimension(3) :: a,b,c
+      integer :: n
+      area=0.0_WP
+      do n=2,nv-1
+         a=verts(:,n  )-verts(:,1)
+         b=verts(:,n+1)-verts(:,1)
+         c=[a(2)*b(3)-a(3)*b(2), a(3)*b(1)-a(1)*b(3), a(1)*b(2)-a(2)*b(1)]
+         area=area+0.5_WP*sqrt(c(1)**2+c(2)**2+c(3)**2)
+      end do
+   end function poly_area
    
    !> Cut a tetrahedron by a plane and return liquid/gas volumes and barycenters
    !> Input:  v(:,1:4) = 4 tet vertices, plane(1:4) = [nx,ny,nz,d] where n.x=d defines plane
@@ -439,24 +457,6 @@ contains
       if (vol_gas.gt.tiny(1.0_WP)) bary_gas = bary_gas / vol_gas
       
    end subroutine cut_tet_vol
-   
-   !> Compute signed volume of flux polyhedron
-   !> face(:,1:8) = 8 vertices (4 at time t, 4 back-projected)
-   !> Decomposes into 6 tets using tet_map and sums signed volumes
-   pure function flux_polyhedron_vol(face) result(vol)
-      implicit none
-      real(WP), dimension(3,8), intent(in) :: face
-      real(WP) :: vol
-      real(WP), dimension(3) :: a, b, c
-      integer :: ntet
-      vol = 0.0_WP
-      do ntet = 1, 6
-         a = face(:,tet_map(1,ntet)) - face(:,tet_map(4,ntet))
-         b = face(:,tet_map(2,ntet)) - face(:,tet_map(4,ntet))
-         c = face(:,tet_map(3,ntet)) - face(:,tet_map(4,ntet))
-         vol = vol + (a(1)*(b(2)*c(3)-c(2)*b(3)) - a(2)*(b(1)*c(3)-c(1)*b(3)) + a(3)*(b(1)*c(2)-c(1)*b(2))) / 6.0_WP
-      end do
-   end function flux_polyhedron_vol
 
    !> Adjust flux polyhedron to enforce target volume
    !> Uses IRL's direction-independent approach: moves vertex 9 along back-face normal
@@ -488,21 +488,31 @@ contains
       dir=cross_sum/max(mag,tiny(1.0_WP))
       ! Move vertex 9
       poly(:,9)=poly(:,9)+adjustment*dir
-      ! DEBUG: Verify corrected volume matches target
-      block
-         real(WP) :: final_vol
-         integer :: ntet
-         final_vol = 0.0_WP
-         do ntet = 1,8
-            final_vol = final_vol + tet_vol([poly(:,tet_map(1,ntet)), poly(:,tet_map(2,ntet)), &
-            &                                poly(:,tet_map(3,ntet)), poly(:,tet_map(4,ntet))])
-         end do
-         if (abs(final_vol - target_volume) > 1.0e-10_WP) then
-            print*, 'correct_flux_poly FAILED: target=', target_volume, 'got=', final_vol, 'diff=', final_vol-target_volume
-         end if
-      end block
-
    end subroutine correct_flux_poly
+
+   !> Compute total signed volume and volume-weighted barycenter of a
+   !> corrected 9-vertex flux polyhedron using tet_map(4,8) decomposition
+   !> No PLIC cutting, no grid-plane recursion.
+   pure subroutine flux_poly_moments(poly,vol,bary)
+      implicit none
+      real(WP), dimension(3,9), intent(in)  :: poly
+      real(WP),                 intent(out) :: vol
+      real(WP), dimension(3),   intent(out) :: bary
+      real(WP), dimension(3) :: a,b,c,centroid
+      real(WP) :: svol
+      integer :: n
+      vol =0.0_WP
+      bary=0.0_WP
+      do n=1,8
+         a=poly(:,tet_map(1,n))-poly(:,tet_map(4,n))
+         b=poly(:,tet_map(2,n))-poly(:,tet_map(4,n))
+         c=poly(:,tet_map(3,n))-poly(:,tet_map(4,n))
+         svol=(-a(1)*(b(2)*c(3)-c(2)*b(3))+a(2)*(b(1)*c(3)-c(1)*b(3))-a(3)*(b(1)*c(2)-c(1)*b(2)))/6.0_WP
+         centroid=0.25_WP*(poly(:,tet_map(1,n))+poly(:,tet_map(2,n))+poly(:,tet_map(3,n))+poly(:,tet_map(4,n)))
+         vol=vol+svol
+         bary=bary+svol*centroid
+      end do
+   end subroutine flux_poly_moments
 
    !> Cut a hex cell by a plane and compute liquid/gas volumes and barycenters
    !> hex(:,1:8) = 8 vertices of hex cell (standard ordering)
@@ -644,41 +654,5 @@ contains
       end do
       
    end subroutine cut_hex_polygon
-   
-   !> =========================================================================
-   !> Cheap vertex count for hex-plane intersection (no interpolation)
-   !> Returns the number of polygon vertices from cutting case lookup only.
-   !> This is much cheaper than cut_hex_polygon since it skips interpolation.
-   !> =========================================================================
-   pure function get_hex_poly_nvert(hex, plane) result(nvert)
-      implicit none
-      real(WP), dimension(3,8), intent(in) :: hex      !< 8 hex vertices
-      real(WP), dimension(4),   intent(in) :: plane    !< (nx, ny, nz, d)
-      integer :: nvert
-      
-      real(WP), dimension(8) :: dist
-      integer :: icase, n
-      
-      ! Compute signed distance from plane for each vertex
-      do n = 1, 8
-         dist(n) = plane(1)*hex(1,n) + plane(2)*hex(2,n) + plane(3)*hex(3,n) - plane(4)
-      end do
-      
-      ! Determine cutting case from sign pattern
-      icase = 0
-      if (dist(1).gt.0.0_WP) icase = icase + 1
-      if (dist(2).gt.0.0_WP) icase = icase + 2
-      if (dist(3).gt.0.0_WP) icase = icase + 4
-      if (dist(4).gt.0.0_WP) icase = icase + 8
-      if (dist(5).gt.0.0_WP) icase = icase + 16
-      if (dist(6).gt.0.0_WP) icase = icase + 32
-      if (dist(7).gt.0.0_WP) icase = icase + 64
-      if (dist(8).gt.0.0_WP) icase = icase + 128
-      
-      ! Get vertex count from lookup table
-      nvert = hex_poly_nvert(icase)
-      if (nvert.lt.0) nvert = 0
-      
-   end function get_hex_poly_nvert
 
 end module amrvof_geometry

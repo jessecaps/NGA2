@@ -1,12 +1,5 @@
-# AMR solvers for AMReX-based simulations
-f90EXE_sources += amrmg_class.f90 amrsolver_class.f90 amrscalar_class.f90 amrincomp_class.f90 amrcomp_class.f90 amrmpcomp_class.f90 amrops.f90
-f90EXE_sources += amrvof_class.f90 amrvof_geometry.f90
-
-# PLICnet for interface normal reconstruction (from two_phase)
-f90EXE_sources += plicnet.f90
+# AMR single-phase solvers
+f90EXE_sources += amrscalar_class.f90 amrincomp_class.f90 amrcomp_class.f90 amrcinc_class.f90
 
 INCLUDE_LOCATIONS += $(NGA_HOME)/src/amrsolvers
 VPATH_LOCATIONS   += $(NGA_HOME)/src/amrsolvers
-INCLUDE_LOCATIONS += $(NGA_HOME)/src/two_phase
-VPATH_LOCATIONS   += $(NGA_HOME)/src/two_phase
-

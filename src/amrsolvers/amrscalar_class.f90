@@ -11,21 +11,18 @@ module amrscalar_class
    use amrio_class,      only: amrio
    use amrex_amr_module, only: amrex_multifab, amrex_boxarray, amrex_distromap, &
    &                           amrex_mfiter, amrex_box, amrex_fab
-   use amrex_multifabutil_module, only: amrex_average_down_faces
    implicit none
    private
 
-   ! Expose type and dispatchers
+   ! Expose type
    public :: amrscalar
-   public :: amrscalar_on_init, amrscalar_on_coarse, amrscalar_on_remake
-   public :: amrscalar_on_clear, amrscalar_tagging, amrscalar_postregrid
 
    !> Constant density scalar solver object definition
    type, extends(amrsolver) :: amrscalar
 
       ! User-configurable callbacks
-      procedure(scalar_init_iface), pointer, nopass :: user_init => null()
-      procedure(scalar_tagging_iface), pointer, nopass :: user_tagging => null()
+      procedure(scalar_init_iface), pointer, pass :: user_init => null()
+      procedure(scalar_tagging_iface), pointer, pass :: user_tagging => null()
 
       ! Scalar variable definition
       integer :: nscalar
@@ -82,12 +79,12 @@ module amrscalar_class
 
    !> Abstract interface for user-overridable tagging callback
    abstract interface
-      subroutine scalar_tagging_iface(solver, lvl, tags, time)
+      subroutine scalar_tagging_iface(solver, lvl, time, tags)
          import :: amrscalar, c_ptr, WP
          class(amrscalar), intent(inout) :: solver
          integer, intent(in) :: lvl
-         type(c_ptr), intent(in) :: tags
          real(WP), intent(in) :: time
+         type(c_ptr), intent(in) :: tags
       end subroutine scalar_tagging_iface
    end interface
 
@@ -108,7 +105,7 @@ contains
       call c_f_pointer(ctx, this)
       call this%on_init(lvl, time, ba, dm)
       ! User-provided initialization
-      if (associated(this%user_init)) call this%user_init(this, lvl, time, ba, dm)
+      if (associated(this%user_init)) call this%user_init(lvl, time, ba, dm)
    end subroutine amrscalar_on_init
 
    !> Dispatch on_coarse: calls type-bound method
@@ -145,15 +142,15 @@ contains
    end subroutine amrscalar_on_clear
 
    !> Dispatch tagging: calls user's procedure pointer with typed solver
-   subroutine amrscalar_tagging(ctx, lvl, tags, time)
+   subroutine amrscalar_tagging(ctx, lvl, time, tags)
       type(c_ptr), intent(in) :: ctx
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags
       type(amrscalar), pointer :: this
       call c_f_pointer(ctx, this)
       ! User-provided tagging
-      if (associated(this%user_tagging)) call this%user_tagging(this, lvl, tags, time)
+      if (associated(this%user_tagging)) call this%user_tagging(lvl, time, tags)
    end subroutine amrscalar_tagging
 
    !> Dispatch post_regrid: calls type-bound method
@@ -245,7 +242,7 @@ contains
       call this%SC%setval(val=0.0_WP, lvl=lvl)
       call this%SCold%setval(val=0.0_WP, lvl=lvl)
       ! Reset flux register for fine levels (if using refluxing)
-      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, this%amr%rref(lvl-1))
+      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)])
    end subroutine on_init
 
    !> Override on_coarse: create new fine level from coarse
@@ -256,11 +253,11 @@ contains
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
       ! SC gets made from coarse
-      call this%SC%on_coarse(this%SC, lvl, time, ba, dm)
+      call this%SC%on_coarse(lvl, time, ba, dm)
       ! SCold just needs geometry
       call this%SCold%reset_level(lvl, ba, dm)
       ! Reset flux register (if using refluxing)
-      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, this%amr%rref(lvl-1))
+      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)])
    end subroutine on_coarse
 
 
@@ -272,11 +269,11 @@ contains
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
       ! Delegate to SC's on_remake callback
-      call this%SC%on_remake(this%SC, lvl, time, ba, dm)
+      call this%SC%on_remake(lvl, time, ba, dm)
       ! SCold just needs new geometry
       call this%SCold%reset_level(lvl, ba, dm)
       ! Rebuild flux register for fine levels (if using refluxing)
-      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, this%amr%rref(lvl-1))
+      if (this%use_refluxing .and. lvl .ge. 1) call this%flux%reset_level(lvl, ba, dm, [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)])
    end subroutine on_remake
 
 
@@ -335,7 +332,7 @@ contains
             this%SCmin(nsc) = min(this%SCmin(nsc), this%SC%get_min(lvl=lvl, comp=nsc))
             this%SCmax(nsc) = max(this%SCmax(nsc), this%SC%get_max(lvl=lvl, comp=nsc))
          end do
-         this%SCint(nsc) = this%SC%get_sum(lvl=0, comp=nsc) * (this%amr%dx(0) * this%amr%dy(0) * this%amr%dz(0)) / this%amr%vol
+         this%SCint(nsc) = this%SC%get_sum(lvl=0, comp=nsc) * this%amr%cell_vol(0) / this%amr%vol
       end do
    end subroutine get_info
 
@@ -343,6 +340,7 @@ contains
    !> Calculate dSC/dt for all levels (all-level API)
    !> Uses flux averaging if use_refluxing=.false., FluxRegister if .true.
    subroutine get_dSCdt(this, U, V, W, SC, dSCdt)
+      use amrex_interface, only: amrmfab_average_down_faces
       implicit none
       class(amrscalar), intent(inout) :: this
       class(amrdata), intent(in) :: U, V, W        ! Face-centered velocity
@@ -429,7 +427,10 @@ contains
       if (.not.this%use_refluxing) then
          ! Flux averaging: average fine fluxes down to coarse
          do lvl = this%amr%clvl(), 1, -1
-            call amrex_average_down_faces(flx(:,lvl), flx(:,lvl-1), this%amr%geom(lvl-1), 1, this%nscalar, this%amr%rref(lvl-1))
+            call amrmfab_average_down_faces(flx(1,lvl)%p, flx(2,lvl)%p, flx(3,lvl)%p, &
+            &   flx(1,lvl-1)%p, flx(2,lvl-1)%p, flx(3,lvl-1)%p, &
+            &   this%amr%geom(lvl-1)%p, 1, this%nscalar, &
+            &   [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)])
          end do
       end if
 
@@ -522,11 +523,13 @@ contains
 
 
    !> Restore solver data from checkpoint
-   subroutine restore_checkpoint(this, io, dirname)
+   subroutine restore_checkpoint(this, io, dirname, time)
       class(amrscalar), intent(inout) :: this
       class(amrio), intent(inout) :: io
       character(len=*), intent(in) :: dirname
+      real(WP), intent(in) :: time
       call io%read_data(dirname, this%SC, 'SC')
+      call this%SC%fill(time=time)
    end subroutine restore_checkpoint
 
 end module amrscalar_class

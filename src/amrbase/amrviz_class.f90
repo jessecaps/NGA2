@@ -1,6 +1,6 @@
-!> AMR Visualization class: HDF5 plotfile output with field registration
-!> Outputs Chombo-compatible HDF5 files with all registered fields in single file
-!> readable by VisIt (Chombo reader) and ParaView (VisItChomboReader)
+!> AMR Visualization class: plotfile output with field registration
+!> Outputs HDF5 (Chombo format) or native AMReX plotfiles
+!> readable by VisIt and ParaView
 module amrviz_class
    use precision,      only: WP
    use string,         only: str_medium,str_long
@@ -10,7 +10,7 @@ module amrviz_class
    use surfmesh_class, only: surfmesh
    use mpi_f08,        only: MPI_Comm,MPI_BARRIER,MPI_BCAST,MPI_INTEGER,MPI_COMM_SIZE,MPI_COMM_RANK
    use parallel,       only: MPI_REAL_WP
-   use amrex_interface, only: amrplotfile_write_hdf5,amrplotfile_read_time
+   use amrex_interface, only: amrplotfile_write_hdf5,amrplotfile_write_native,amrplotfile_read_time
    use amrex_amr_module, only: amrex_multifab,amrex_mfiter,amrex_box, &
    &                           amrex_multifab_build,amrex_multifab_destroy, &
    &                           amrex_mfiter_build,amrex_mfiter_destroy
@@ -47,6 +47,7 @@ module amrviz_class
       type(srf), pointer :: first_srf => null()  !< Registered surface meshes
       integer :: ntime = 0                       !< File counter for output
       real(WP), allocatable :: time(:)           !< Time values for each file
+      logical :: use_hdf5 = .true.               !< If true, HDF5/Chombo; if false, native AMReX
    contains
       procedure :: initialize                    !< Initialize with grid
       procedure :: add_scalar                    !< Register a scalar field
@@ -61,7 +62,7 @@ contains
 
    !> Initialize visualization handler with AMR grid
    !> If output directory already exists with files, reads their times to continue series
-   subroutine initialize(this, amr, name)
+   subroutine initialize(this, amr, name, use_hdf5)
       use filesys, only: makedir, isdir, isfile
       use mpi_f08, only: MPI_BCAST, MPI_INTEGER
       use parallel, only: MPI_REAL_WP
@@ -69,6 +70,7 @@ contains
       class(amrviz), intent(inout) :: this
       class(amrgrid), target, intent(in) :: amr
       character(len=*), intent(in) :: name
+      logical, intent(in), optional :: use_hdf5
 
       character(len=str_medium) :: filename, dirname
       integer :: ierr, n
@@ -78,6 +80,7 @@ contains
       this%name = trim(adjustl(name))
       this%ntime = 0
       this%first_scl => null()
+      if (present(use_hdf5)) this%use_hdf5 = use_hdf5
 
       ! Create output directory: amrviz/<name>/
       dirname = 'amrviz/'//trim(this%name)
@@ -95,11 +98,11 @@ contains
             character(len=8) :: found_centering
             integer :: ic
 
-            ! Find first centering type that has files
+            ! Find first centering type that has files or directories
             found_centering = ''
             find_centering: do ic = 1, 8
-               write(filename,'(a,"/nga2.",a,".",i6.6,".h5")') trim(dirname), trim(centerings(ic)), 1
-               if (isfile(trim(filename))) then
+               write(filename,'(a,"/plt.nga2.",a,".",i6.6)') trim(dirname), trim(centerings(ic)), 1
+               if (isfile(trim(filename)).or.isdir(trim(filename))) then
                   found_centering = centerings(ic)
                   exit find_centering
                end if
@@ -110,8 +113,8 @@ contains
                n = 0
                do
                   n = n + 1
-                  write(filename,'(a,"/nga2.",a,".",i6.6,".h5")') trim(dirname), trim(found_centering), n
-                  if (.not.isfile(trim(filename))) exit
+                  write(filename,'(a,"/plt.nga2.",a,".",i6.6)') trim(dirname), trim(found_centering), n
+                  if (.not.isfile(trim(filename)).and..not.isdir(trim(filename))) exit
                   file_time = amrplotfile_read_time(trim(filename)//c_null_char)
                   if (file_time .lt. 0.0_WP) exit  ! File exists but unreadable
                end do
@@ -121,7 +124,7 @@ contains
                if (this%ntime .gt. 0) then
                   allocate(this%time(this%ntime))
                   do n = 1, this%ntime
-                     write(filename,'(a,"/nga2.",a,".",i6.6,".h5")') trim(dirname), trim(found_centering), n
+                     write(filename,'(a,"/plt.nga2.",a,".",i6.6)') trim(dirname), trim(found_centering), n
                      this%time(n) = amrplotfile_read_time(trim(filename)//c_null_char)
                   end do
                end if
@@ -195,7 +198,7 @@ contains
 
    !> Write all registered fields to HDF5 plotfiles
    !> Fields are grouped by centering type - one file per centering
-   !> File pattern: amrviz/<name>/nga2.<centering>.<ntime>.h5
+   !> File pattern: amrviz/<name>/plt.nga2.<centering>.<ntime>.h5
    !> Centerings: cell, xface, yface, zface, xyedge, xzedge, yzedge, node
    subroutine write(this, time)
       implicit none
@@ -370,14 +373,14 @@ contains
          end do
 
          ! Generate filename with centering type
-         filename = 'amrviz/'//trim(this%name)//'/nga2.'//trim(suffix)//'.'
+         filename = 'amrviz/'//trim(this%name)//'/plt.nga2.'//trim(suffix)//'.'
          write(filename(len_trim(filename)+1:len_trim(filename)+6),'(i6.6)') this%ntime
 
          ! Prepare pointers for HDF5 writer
          allocate(mf_ptrs(0:this%amr%clvl()))
          allocate(geom_ptrs(0:this%amr%clvl()))
          allocate(level_steps(0:this%amr%clvl()))
-         allocate(ref_ratios(0:max(this%amr%clvl()-1,0)))
+         allocate(ref_ratios(0:max(3*this%amr%clvl()-1,0)))
 
          do lev = 0, this%amr%clvl()
             mf_ptrs(lev) = combined(lev)%p
@@ -385,13 +388,21 @@ contains
             level_steps(lev) = this%ntime
          end do
          do lev = 0, this%amr%clvl()-1
-            ref_ratios(lev) = this%amr%rref(lev)
+            ref_ratios(3*lev+0) = this%amr%rrefx(lev)
+            ref_ratios(3*lev+1) = this%amr%rrefy(lev)
+            ref_ratios(3*lev+2) = this%amr%rrefz(lev)
          end do
 
-         ! Write HDF5 file for this centering group
-         call amrplotfile_write_hdf5(trim(filename)//c_null_char, nlev, mf_ptrs, &
-            varname_ptrs, ncomp, geom_ptrs, real(time,c_double), level_steps, &
-            ref_ratios, c_null_char)
+         ! Write plotfile for this centering group
+         if (this%use_hdf5) then
+            call amrplotfile_write_hdf5(trim(filename)//c_null_char, nlev, mf_ptrs, &
+               varname_ptrs, ncomp, geom_ptrs, real(time,c_double), level_steps, &
+               ref_ratios, c_null_char)
+         else
+            call amrplotfile_write_native(trim(filename)//c_null_char, nlev, mf_ptrs, &
+               varname_ptrs, ncomp, geom_ptrs, real(time,c_double), level_steps, &
+               ref_ratios)
+         end if
 
          ! Cleanup for this group
          do lev = 0, this%amr%clvl()
@@ -548,7 +559,7 @@ contains
       
       ! Construct filename with timestep
       dirname = 'amrviz/'//trim(this%name)
-      write(basename,'(A,"_",I8.8,".vtp")') trim(srf_name), this%ntime
+      write(basename,'(A,"_",I6.6,".vtp")') trim(srf_name), this%ntime
       filename = trim(dirname)//'/'//trim(basename)
       
       ! Rank 0 creates header
@@ -702,7 +713,7 @@ contains
       write(iunit,'(a)') '  <Collection>'
       
       do n = 1, this%ntime
-         write(basename,'(A,"_",I8.8,".vtp")') trim(srf_name), n
+         write(basename,'(A,"_",I6.6,".vtp")') trim(srf_name), n
          write(iunit,'(a,es18.10,a,a,a)') '    <DataSet timestep="', this%time(n), &
             '" file="', trim(basename), '"/>'
       end do

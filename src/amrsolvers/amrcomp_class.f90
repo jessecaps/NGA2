@@ -10,17 +10,15 @@ module amrcomp_class
    implicit none
    private
 
-   ! Expose type and dispatchers
+   ! Expose type
    public :: amrcomp
-   public :: amrcomp_on_init,amrcomp_on_coarse,amrcomp_on_remake
-   public :: amrcomp_on_clear,amrcomp_tagging,amrcomp_postregrid
 
    !> AMR Compressible solver type
    type, extends(amrsolver) :: amrcomp
       ! User-configurable callbacks
-      procedure(comp_init_iface), pointer, nopass :: user_init=>null()
-      procedure(comp_tagging_iface), pointer, nopass :: user_tagging=>null()
-      procedure(comp_bc_iface), pointer, nopass :: user_bc=>null()
+      procedure(comp_init_iface), pointer, pass :: user_init=>null()
+      procedure(comp_tagging_iface), pointer, pass :: user_tagging=>null()
+      procedure(comp_bc_iface), pointer, pass :: user_bc=>null()
 
       ! Equation of state function pointers: P=P(rho,I), C=C(rho,P), T=T(rho,P)
       procedure(eos_P_iface), pointer, nopass :: getP=>null()
@@ -77,7 +75,8 @@ module amrcomp_class
       procedure :: get_primitive
       procedure :: get_conserved
       procedure :: get_dQdt
-      procedure :: get_viscartif
+      procedure :: add_viscartif
+      procedure :: add_vreman
       procedure :: get_cfl
       ! Print
       procedure :: get_info
@@ -101,12 +100,12 @@ module amrcomp_class
 
    !> Abstract interface for tagging callback
    abstract interface
-      subroutine comp_tagging_iface(solver,lvl,tags,time)
+      subroutine comp_tagging_iface(solver,lvl,time,tags)
          import :: amrcomp,c_ptr,WP
          class(amrcomp), intent(inout) :: solver
          integer, intent(in) :: lvl
-         type(c_ptr), intent(in) :: tags
          real(WP), intent(in) :: time
+         type(c_ptr), intent(in) :: tags
       end subroutine comp_tagging_iface
    end interface
 
@@ -139,14 +138,15 @@ module amrcomp_class
 
    !> Abstract interface for user BC callback
    abstract interface
-      subroutine comp_bc_iface(solver,pQ,bc_bx,face,time)
+      subroutine comp_bc_iface(solver,lvl,time,face,bx,pQ)
          use amrex_amr_module, only: amrex_box
          import :: amrcomp,WP
          class(amrcomp), intent(inout) :: solver
-         real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
-         type(amrex_box), intent(in) :: bc_bx
-         integer, intent(in) :: face
+         integer, intent(in) :: lvl
          real(WP), intent(in) :: time
+         integer, intent(in) :: face
+         type(amrex_box), intent(in) :: bx
+         real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
       end subroutine comp_bc_iface
    end interface
 
@@ -168,7 +168,7 @@ contains
       type(amrcomp), pointer :: this
       call c_f_pointer(ctx,this)
       call this%on_init(lvl,time,ba,dm)
-      if (associated(this%user_init)) call this%user_init(this,lvl,time,ba,dm)
+      if (associated(this%user_init)) call this%user_init(lvl,time,ba,dm)
    end subroutine amrcomp_on_init
 
    !> Dispatch on_coarse: calls type-bound method
@@ -211,16 +211,16 @@ contains
    end subroutine amrcomp_on_clear
 
    !> Dispatch tagging: calls user callback if set
-   subroutine amrcomp_tagging(ctx,lvl,tags,time)
+   subroutine amrcomp_tagging(ctx,lvl,time,tags)
       use iso_c_binding, only: c_f_pointer
       implicit none
       type(c_ptr), intent(in) :: ctx
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags
       type(amrcomp), pointer :: this
       call c_f_pointer(ctx,this)
-      if (associated(this%user_tagging)) call this%user_tagging(this,lvl,tags,time)
+      if (associated(this%user_tagging)) call this%user_tagging(lvl,time,tags)
    end subroutine amrcomp_tagging
 
    !> Dispatch post_regrid: calls type-bound method
@@ -367,7 +367,7 @@ contains
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
       ! Use conservative interpolation from coarse for Q
-      call this%Q%on_coarse(this%Q,lvl,time,ba,dm)
+      call this%Q%on_coarse(lvl,time,ba,dm)
       ! Qold just needs to be reset
       call this%Qold%reset_level(lvl,ba,dm)
       ! Derived variables are just reset
@@ -392,7 +392,7 @@ contains
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
       ! Use on_remake from amrdata for Q
-      call this%Q%on_remake(this%Q,lvl,time,ba,dm)
+      call this%Q%on_remake(lvl,time,ba,dm)
       ! Qold just needs to be reset
       call this%Qold%reset_level(lvl,ba,dm)
       ! Derived variables are just reset
@@ -459,6 +459,7 @@ contains
       real(WP), dimension(:,:,:,:), contiguous, pointer :: p
       integer :: ilo,ihi,jlo,jhi,klo,khi
       integer :: dlo(3),dhi(3)
+      integer :: lvl
       
       ! First apply default BC handling (foextrap,hoextrap,reflect,etc.)
       call default_fillbc(this,mf,scomp,ncomp,time,geom)
@@ -472,9 +473,10 @@ contains
       ! Check if user callback exists
       if (.not.associated(solver%user_bc)) return
 
-      ! Get domain bounds
+      ! Get domain bounds and level
       dlo=geom%domain%lo
       dhi=geom%domain%hi
+      lvl=this%fill_lvl_cache
 
       ! Loop over FABs and apply user_bc for ext_dir faces
       call amrex_mfiter_build(mfi,mf,tiling=.false.)
@@ -487,37 +489,37 @@ contains
          ! X-LOW (face=1)
          if (this%lo_bc(1,1).eq.amrex_bc_ext_dir .and. ilo.lt.dlo(1)) then
             bc_bx=amrex_box([ilo,jlo,klo],[dlo(1)-1,jhi,khi])
-            call solver%user_bc(solver,p,bc_bx,1,time)
+            call solver%user_bc(lvl=lvl,time=time,face=1,bx=bc_bx,pQ=p)
          end if
 
          ! X-HIGH (face=2)
          if (this%hi_bc(1,1).eq.amrex_bc_ext_dir .and. ihi.gt.dhi(1)) then
             bc_bx=amrex_box([dhi(1)+1,jlo,klo],[ihi,jhi,khi])
-            call solver%user_bc(solver,p,bc_bx,2,time)
+            call solver%user_bc(lvl=lvl,time=time,face=2,bx=bc_bx,pQ=p)
          end if
 
          ! Y-LOW (face=3)
          if (this%lo_bc(2,1).eq.amrex_bc_ext_dir .and. jlo.lt.dlo(2)) then
             bc_bx=amrex_box([ilo,jlo,klo],[ihi,dlo(2)-1,khi])
-            call solver%user_bc(solver,p,bc_bx,3,time)
+            call solver%user_bc(lvl=lvl,time=time,face=3,bx=bc_bx,pQ=p)
          end if
 
          ! Y-HIGH (face=4)
          if (this%hi_bc(2,1).eq.amrex_bc_ext_dir .and. jhi.gt.dhi(2)) then
             bc_bx=amrex_box([ilo,dhi(2)+1,klo],[ihi,jhi,khi])
-            call solver%user_bc(solver,p,bc_bx,4,time)
+            call solver%user_bc(lvl=lvl,time=time,face=4,bx=bc_bx,pQ=p)
          end if
 
          ! Z-LOW (face=5)
          if (this%lo_bc(3,1).eq.amrex_bc_ext_dir .and. klo.lt.dlo(3)) then
             bc_bx=amrex_box([ilo,jlo,klo],[ihi,jhi,dlo(3)-1])
-            call solver%user_bc(solver,p,bc_bx,5,time)
+            call solver%user_bc(lvl=lvl,time=time,face=5,bx=bc_bx,pQ=p)
          end if
 
          ! Z-HIGH (face=6)
          if (this%hi_bc(3,1).eq.amrex_bc_ext_dir .and. khi.gt.dhi(3)) then
             bc_bx=amrex_box([ilo,jlo,dhi(3)+1],[ihi,jhi,khi])
-            call solver%user_bc(solver,p,bc_bx,6,time)
+            call solver%user_bc(lvl=lvl,time=time,face=6,bx=bc_bx,pQ=p)
          end if
 
       end do
@@ -788,9 +790,9 @@ contains
 
       ! Phase 2: Average down all fluxes for C/F conservation
       do lvl=this%amr%clvl(),1,-1
-         call amrmfab_average_down_face(fmf=Fx(lvl),cmf=Fx(lvl-1),rr=this%amr%rref(lvl-1),cgeom=this%amr%geom(lvl-1))
-         call amrmfab_average_down_face(fmf=Fy(lvl),cmf=Fy(lvl-1),rr=this%amr%rref(lvl-1),cgeom=this%amr%geom(lvl-1))
-         call amrmfab_average_down_face(fmf=Fz(lvl),cmf=Fz(lvl-1),rr=this%amr%rref(lvl-1),cgeom=this%amr%geom(lvl-1))
+         call amrmfab_average_down_face(fmf=Fx(lvl),cmf=Fx(lvl-1),rr=[this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)],cgeom=this%amr%geom(lvl-1))
+         call amrmfab_average_down_face(fmf=Fy(lvl),cmf=Fy(lvl-1),rr=[this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)],cgeom=this%amr%geom(lvl-1))
+         call amrmfab_average_down_face(fmf=Fz(lvl),cmf=Fz(lvl-1),rr=[this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)],cgeom=this%amr%geom(lvl-1))
       end do
          
       ! Phase 3: Compute divergence for all levels
@@ -867,30 +869,32 @@ contains
       end function weno_weight
    end subroutine get_dQdt
 
-   !> Compute artificial bulk viscosity
-   subroutine get_viscartif(this,dt,beta)
+   !> Add artificial bulk viscosity to this%beta and this%visc
+   subroutine add_viscartif(this,dt,Cartif,Cvisc)
       use amrex_amr_module, only: amrex_mfiter,amrex_box,amrex_multifab,amrex_multifab_destroy
       implicit none
       class(amrcomp), intent(inout) :: this
       real(WP), intent(in) :: dt
-      class(amrdata), intent(inout) :: beta
+      real(WP), intent(in), optional :: Cartif
+      real(WP), intent(in), optional :: Cvisc
       ! Local variables
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
-      type(amrex_multifab) :: div
-      real(WP), dimension(:,:,:,:), contiguous, pointer :: pBeta,pDiv,pU,pV,pW,pC
-      real(WP) :: dxi,dyi,dzi,dx,dy,dz,max_beta
+      type(amrex_multifab) :: beta_t,scratch
+      real(WP), dimension(:,:,:,:), contiguous, pointer :: pBeta_t,pScratch,pU,pV,pW,pC,pBeta,pVisc,pQ
+      real(WP) :: dxi,dyi,dzi,dx,dy,dz,max_beta,myCartif,myCvisc
       real(WP) :: dudy,dudz,dvdx,dvdz,dwdx,dwdy,vort,grad_div
-      integer :: lvl,i,j,k,si,sj,sk,n
+      integer :: lvl,i,j,k
       ! Parameters
-      real(WP), parameter :: Cartif=2.0_WP
       real(WP), parameter :: max_cfl=0.5_WP
       integer, parameter :: nfilter=2
-      real(WP), dimension(-1:+1), parameter :: filter=[1.0_WP/6.0_WP,2.0_WP/3.0_WP,1.0_WP/6.0_WP]
-      
-      ! Zero out beta
-      call beta%setval(val=0.0_WP)
-      
+
+      ! Set model constant
+      if (present(Cartif)) then; myCartif=Cartif; else; myCartif=5.0_WP; end if
+
+      ! Set shear viscosity constant
+      if (present(Cvisc)) then; myCvisc=Cvisc; else; myCvisc=0.0_WP; end if
+
       ! Loop over levels
       do lvl=0,this%amr%clvl()
          
@@ -900,42 +904,39 @@ contains
          dz=this%amr%dz(lvl); dzi=1.0_WP/dz
          
          ! Max beta from CFL
-         max_beta=max_cfl*min(dx**2,dy**2,dz**2)/(4.0_WP*dt)
+         max_beta=max_cfl*this%amr%min_meshsize(lvl)**2/(4.0_WP*dt)
          
-         ! Build temp multifab for divergence at this level (1 ghost cell)
-         call this%amr%mfab_build(lvl=lvl,mfab=div,ncomp=1,nover=1); call div%setval(0.0_WP)
+         ! Build temp multifabs
+         call this%amr%mfab_build(lvl=lvl,mfab=scratch,ncomp=1,nover=1); call scratch%setval(0.0_WP)
+         call this%amr%mfab_build(lvl=lvl,mfab=beta_t,ncomp=1,nover=this%nover); call beta_t%setval(0.0_WP)
          
-         ! Phase 1: Compute divergence
+         ! Phase 1: Compute divergence into scratch
          call this%amr%mfiter_build(lvl,mfi)
          do while(mfi%next())
-            ! Get data pointers
             pU=>this%U%mf(lvl)%dataptr(mfi)
             pV=>this%V%mf(lvl)%dataptr(mfi)
             pW=>this%W%mf(lvl)%dataptr(mfi)
-            pDiv=>div%dataptr(mfi)
-            ! Loop over tiles grown by 1 (safe as velocity has 2 ghost cells)
+            pScratch=>scratch%dataptr(mfi)
             bx=mfi%growntilebox(1)
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-               pDiv(i,j,k,1)=0.5_WP*(dxi*(pU(i+1,j,k,1)-pU(i-1,j,k,1))+dyi*(pV(i,j+1,k,1)-pV(i,j-1,k,1))+dzi*(pW(i,j,k+1,1)-pW(i,j,k-1,1)))
+               pScratch(i,j,k,1)=0.5_WP*(dxi*(pU(i+1,j,k,1)-pU(i-1,j,k,1))+dyi*(pV(i,j+1,k,1)-pV(i,j-1,k,1))+dzi*(pW(i,j,k+1,1)-pW(i,j,k-1,1)))
             end do; end do; end do
          end do
          call this%amr%mfiter_destroy(mfi)
          
-         ! Phase 2: Compute beta
+         ! Phase 2: Compute kinematic beta
          call this%amr%mfiter_build(lvl,mfi)
          do while(mfi%next())
-            ! Get data pointers
             pU=>this%U%mf(lvl)%dataptr(mfi)
             pV=>this%V%mf(lvl)%dataptr(mfi)
             pW=>this%W%mf(lvl)%dataptr(mfi)
             pC=>this%C%mf(lvl)%dataptr(mfi)
-            pDiv=>div%dataptr(mfi)
-            pBeta=>beta%mf(lvl)%dataptr(mfi)
-            ! Loop over interior tiles
+            pScratch=>scratch%dataptr(mfi)
+            pBeta_t=>beta_t%dataptr(mfi)
             bx=mfi%tilebox()
             do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                ! Only work in compression regions
-               if (pDiv(i,j,k,1).ge.0.0_WP) cycle
+               if (pScratch(i,j,k,1).ge.0.0_WP) cycle
                ! Compute local vorticity
                dudy=0.5_WP*dyi*(pU(i,j+1,k,1)-pU(i,j-1,k,1))
                dudz=0.5_WP*dzi*(pU(i,j,k+1,1)-pU(i,j,k-1,1))
@@ -945,57 +946,144 @@ contains
                dwdy=0.5_WP*dyi*(pW(i,j+1,k,1)-pW(i,j-1,k,1))
                vort=(dwdy-dvdz)**2+(dudz-dwdx)**2+(dvdx-dudy)**2
                ! Compute |grad(div)|
-               grad_div=max(abs(pDiv(i+1,j,k,1)-pDiv(i,j,k,1)),abs(pDiv(i,j,k,1)-pDiv(i-1,j,k,1)))*dx**2 &
-               &       +max(abs(pDiv(i,j+1,k,1)-pDiv(i,j,k,1)),abs(pDiv(i,j,k,1)-pDiv(i,j-1,k,1)))*dy**2 &
-               &       +max(abs(pDiv(i,j,k+1,1)-pDiv(i,j,k,1)),abs(pDiv(i,j,k,1)-pDiv(i,j,k-1,1)))*dz**2
+               grad_div=max(abs(pScratch(i+1,j,k,1)-pScratch(i,j,k,1)),abs(pScratch(i,j,k,1)-pScratch(i-1,j,k,1)))*dx**2 &
+               &       +max(abs(pScratch(i,j+1,k,1)-pScratch(i,j,k,1)),abs(pScratch(i,j,k,1)-pScratch(i,j-1,k,1)))*dy**2 &
+               &       +max(abs(pScratch(i,j,k+1,1)-pScratch(i,j,k,1)),abs(pScratch(i,j,k,1)-pScratch(i,j,k-1,1)))*dz**2
                ! Floor vorticity with sound speed
-               vort=max(vort,(0.05_WP*pC(i,j,k,1)/min(dx,dy,dz))**2)
+               vort=max(vort,(0.05_WP*pC(i,j,k,1)/this%amr%min_meshsize(lvl))**2)
                ! Compute beta
-               pBeta(i,j,k,1)=Cartif*grad_div*min(4.0_WP/3.0_WP*pDiv(i,j,k,1)**2/(pDiv(i,j,k,1)**2+vort+1.0e-15_WP),1.0_WP)
+               pBeta_t(i,j,k,1)=myCartif*grad_div*min(4.0_WP/3.0_WP*pScratch(i,j,k,1)**2/(pScratch(i,j,k,1)**2+vort+1.0e-15_WP),1.0_WP)
                ! Clip to max
-               pBeta(i,j,k,1)=min(pBeta(i,j,k,1),max_beta)
+               pBeta_t(i,j,k,1)=min(pBeta_t(i,j,k,1),max_beta)
+            end do; end do; end do
+         end do
+         call this%amr%mfiter_destroy(mfi)
+
+         ! Destroy scratch
+         call amrex_multifab_destroy(scratch)
+
+         ! Phase 3: Filter beta_t
+         call this%amr%mfab_filter(lvl=lvl,mfab=beta_t,npass=nfilter)
+
+         ! Phase 4: Convert to dynamic viscosity and add to this%beta
+         call this%amr%mfiter_build(lvl,mfi)
+         do while(mfi%next())
+            pBeta_t=>beta_t%dataptr(mfi)
+            pBeta=>this%beta%mf(lvl)%dataptr(mfi)
+            pVisc=>this%visc%mf(lvl)%dataptr(mfi)
+            pQ=>this%Q%mf(lvl)%dataptr(mfi)
+            bx=mfi%growntilebox(this%nover)
+            do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
+               pBeta(i,j,k,1)=pBeta(i,j,k,1)+pBeta_t(i,j,k,1)*pQ(i,j,k,1)
+               pVisc(i,j,k,1)=pVisc(i,j,k,1)+pBeta_t(i,j,k,1)*pQ(i,j,k,1)*myCvisc
+            end do; end do; end do
+         end do
+         call this%amr%mfiter_destroy(mfi)
+
+         ! Destroy temp multifab
+         call amrex_multifab_destroy(beta_t)
+         
+      end do
+
+   end subroutine add_viscartif
+
+   !> Add Vreman SGS eddy viscosity to this%visc
+   subroutine add_vreman(this,dt,Cs)
+      use amrex_amr_module, only: amrex_mfiter,amrex_box,amrex_multifab,amrex_multifab_destroy
+      implicit none
+      class(amrcomp), intent(inout) :: this
+      real(WP), intent(in) :: dt
+      real(WP), intent(in), optional :: Cs
+      ! Local variables
+      type(amrex_mfiter) :: mfi
+      type(amrex_box) :: bx
+      type(amrex_multifab) :: visc_t
+      real(WP), dimension(:,:,:,:), contiguous, pointer :: pVisc_t,pU,pV,pW,pVisc,pQ
+      real(WP) :: dxi,dyi,dzi,dx,dy,dz,max_visc,Cmodel,Aij,Bij
+      real(WP), dimension(1:3,1:3) :: gradU,betaij
+      integer :: lvl,i,j,k,si,sj
+      ! Parameters
+      real(WP), parameter :: max_cfl=0.5_WP
+      integer, parameter :: nfilter=2
+
+      ! Model constant: c=2.5*Cs**2 (Vreman uses c=0.07 which corresponds to Cs=0.17)
+      if (present(Cs)) then; Cmodel=2.5_WP*Cs**2; else; Cmodel=2.5_WP*0.17_WP**2; end if
+      
+      ! Loop over levels
+      do lvl=0,this%amr%clvl()
+         
+         ! Grid spacings
+         dx=this%amr%dx(lvl); dxi=1.0_WP/dx
+         dy=this%amr%dy(lvl); dyi=1.0_WP/dy
+         dz=this%amr%dz(lvl); dzi=1.0_WP/dz
+         
+         ! Max visc from CFL
+         max_visc=max_cfl*this%amr%min_meshsize(lvl)**2/(4.0_WP*dt)
+         
+         ! Build temp multifab for eddy viscosity at this level (nover ghost cells)
+         call this%amr%mfab_build(lvl=lvl,mfab=visc_t,ncomp=1,nover=this%nover); call visc_t%setval(0.0_WP)
+         
+         ! Phase 1: Compute kinematic eddy viscosity
+         call this%amr%mfiter_build(lvl,mfi)
+         do while(mfi%next())
+            ! Get data pointers
+            pU=>this%U%mf(lvl)%dataptr(mfi)
+            pV=>this%V%mf(lvl)%dataptr(mfi)
+            pW=>this%W%mf(lvl)%dataptr(mfi)
+            pVisc_t=>visc_t%dataptr(mfi)
+            ! Loop over interior tiles
+            bx=mfi%tilebox()
+            do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
+               ! Compute cell-centered velocity gradient tensor
+               gradU(1,1)=0.5_WP*dxi*(pU(i+1,j,k,1)-pU(i-1,j,k,1))
+               gradU(2,1)=0.5_WP*dyi*(pU(i,j+1,k,1)-pU(i,j-1,k,1))
+               gradU(3,1)=0.5_WP*dzi*(pU(i,j,k+1,1)-pU(i,j,k-1,1))
+               gradU(1,2)=0.5_WP*dxi*(pV(i+1,j,k,1)-pV(i-1,j,k,1))
+               gradU(2,2)=0.5_WP*dyi*(pV(i,j+1,k,1)-pV(i,j-1,k,1))
+               gradU(3,2)=0.5_WP*dzi*(pV(i,j,k+1,1)-pV(i,j,k-1,1))
+               gradU(1,3)=0.5_WP*dxi*(pW(i+1,j,k,1)-pW(i-1,j,k,1))
+               gradU(2,3)=0.5_WP*dyi*(pW(i,j+1,k,1)-pW(i,j-1,k,1))
+               gradU(3,3)=0.5_WP*dzi*(pW(i,j,k+1,1)-pW(i,j,k-1,1))
+               ! Compute A=gradU_ij*gradU_ij invariant
+               Aij=sum(gradU**2)
+               ! Compute beta_ij=dx_m^2*gradU_mi*gradU_mj
+               do sj=1,3; do si=1,3
+                  betaij(si,sj)=dx**2*gradU(1,si)*gradU(1,sj)+dy**2*gradU(2,si)*gradU(2,sj)+dz**2*gradU(3,si)*gradU(3,sj)
+               end do; end do
+               ! Compute B invariant
+               Bij=betaij(1,1)*betaij(2,2)-betaij(1,2)**2+betaij(1,1)*betaij(3,3)-betaij(1,3)**2+betaij(2,2)*betaij(3,3)-betaij(2,3)**2
+               ! Assemble eddy viscosity
+               if (Bij.gt.0.0_WP) then
+                  pVisc_t(i,j,k,1)=Cmodel*sqrt(Bij/Aij)
+               end if
+               ! Clip to CFL limit
+               pVisc_t(i,j,k,1)=min(pVisc_t(i,j,k,1),max_visc)
             end do; end do; end do
          end do
          call this%amr%mfiter_destroy(mfi)
          
-         ! Phase 3: Filter beta using div as scratch
-         do n=1,nfilter
-            ! Reset div to zero
-            call div%setval(0.0_WP)
-            ! Copy beta to div
-            call div%copy(srcmf=beta%mf(lvl),srccomp=1,dstcomp=1,nc=1,ng=0)
-            ! Fill internal/periodic ghosts
-            call div%fill_boundary(this%amr%geom(lvl))
-            ! Apply Neumann BCs
-            call this%amr%mfab_foextrap(lvl=lvl,mfab=div)
-            ! Apply filter
-            call this%amr%mfiter_build(lvl,mfi)
-            do while(mfi%next())
-               ! Get data pointers
-               pDiv=>div%dataptr(mfi)
-               pBeta=>beta%mf(lvl)%dataptr(mfi)
-               ! Loop over interior tiles
-               bx=mfi%tilebox()
-               do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-                  pBeta(i,j,k,1)=0.0_WP
-                  do sk=-1,+1; do sj=-1,+1; do si=-1,+1
-                     pBeta(i,j,k,1)=pBeta(i,j,k,1)+filter(si)*filter(sj)*filter(sk)*pDiv(i+si,j+sj,k+sk,1)
-                  end do; end do; end do
-               end do; end do; end do
-            end do
-            call this%amr%mfiter_destroy(mfi)
+         ! Phase 2: Filter visc_t
+         call this%amr%mfab_filter(lvl=lvl,mfab=visc_t,npass=nfilter)
+
+         ! Phase 3: Convert to dynamic viscosity and add to this%visc
+         call this%amr%mfiter_build(lvl,mfi)
+         do while(mfi%next())
+            pVisc_t=>visc_t%dataptr(mfi)
+            pVisc=>this%visc%mf(lvl)%dataptr(mfi)
+            pQ=>this%Q%mf(lvl)%dataptr(mfi)
+            bx=mfi%growntilebox(this%nover)
+            do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
+               pVisc(i,j,k,1)=pVisc(i,j,k,1)+pVisc_t(i,j,k,1)*pQ(i,j,k,1)
+            end do; end do; end do
          end do
+         call this%amr%mfiter_destroy(mfi)
 
-         ! Destroy temp divergence multifab
-         call amrex_multifab_destroy(div)
-
-         ! Fill beta's ghosts at this level
-         call beta%mf(lvl)%fill_boundary(this%amr%geom(lvl))
-         call this%amr%mfab_foextrap(lvl=lvl,mfab=beta%mf(lvl))
-
+         ! Destroy temp multifab
+         call amrex_multifab_destroy(visc_t)
+         
       end do
 
-   end subroutine get_viscartif
+   end subroutine add_vreman
 
    !> Calculate CFL numbers
    subroutine get_cfl(this,dt,cfl)
@@ -1038,24 +1126,24 @@ contains
                bx=mfi%tilebox()
                do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
                   rho=max(pQ(i,j,k,1),this%rho_floor)
-                  viscmax=max(viscmax,pVisc(i,j,k,1)/rho,pBeta(i,j,k,1)/rho,pDiff(i,j,k,1)/rho)
+                  viscmax=max(viscmax,pVisc(i,j,k,1)/rho,pBeta(i,j,k,1)/rho,pDiff(i,j,k,1)/rho) ! Heat diffusion cfl is incorrect
                end do; end do; end do
             end do
             call this%amr%mfiter_destroy(mfi)
             call MPI_ALLREDUCE(MPI_IN_PLACE,viscmax,1,MPI_REAL_WP,MPI_MAX,this%amr%comm,ierr)
          end block get_viscmax
          ! Convective+acoustic
-         this%CFLc_x=max(this%CFLc_x,(Umax+Cmax)*dt/this%amr%dx(lvl))
-         this%CFLc_y=max(this%CFLc_y,(Vmax+Cmax)*dt/this%amr%dy(lvl))
-         this%CFLc_z=max(this%CFLc_z,(Wmax+Cmax)*dt/this%amr%dz(lvl))
+         if (this%amr%nx.gt.1) this%CFLc_x=max(this%CFLc_x,(Umax+Cmax)*dt/this%amr%dx(lvl))
+         if (this%amr%ny.gt.1) this%CFLc_y=max(this%CFLc_y,(Vmax+Cmax)*dt/this%amr%dy(lvl))
+         if (this%amr%nz.gt.1) this%CFLc_z=max(this%CFLc_z,(Wmax+Cmax)*dt/this%amr%dz(lvl))
          ! Acoustic
-         this%CFLa_x=max(this%CFLa_x,Cmax*dt/this%amr%dx(lvl))
-         this%CFLa_y=max(this%CFLa_y,Cmax*dt/this%amr%dy(lvl))
-         this%CFLa_z=max(this%CFLa_z,Cmax*dt/this%amr%dz(lvl))
+         if (this%amr%nx.gt.1) this%CFLa_x=max(this%CFLa_x,Cmax*dt/this%amr%dx(lvl))
+         if (this%amr%ny.gt.1) this%CFLa_y=max(this%CFLa_y,Cmax*dt/this%amr%dy(lvl))
+         if (this%amr%nz.gt.1) this%CFLa_z=max(this%CFLa_z,Cmax*dt/this%amr%dz(lvl))
          ! Viscous
-         this%CFLv_x=max(this%CFLv_x,4.0_WP*viscmax*dt/this%amr%dx(lvl)**2)
-         this%CFLv_y=max(this%CFLv_y,4.0_WP*viscmax*dt/this%amr%dy(lvl)**2)
-         this%CFLv_z=max(this%CFLv_z,4.0_WP*viscmax*dt/this%amr%dz(lvl)**2)
+         if (this%amr%nx.gt.1) this%CFLv_x=max(this%CFLv_x,4.0_WP*viscmax*dt/this%amr%dx(lvl)**2)
+         if (this%amr%ny.gt.1) this%CFLv_y=max(this%CFLv_y,4.0_WP*viscmax*dt/this%amr%dy(lvl)**2)
+         if (this%amr%nz.gt.1) this%CFLv_z=max(this%CFLv_z,4.0_WP*viscmax*dt/this%amr%dz(lvl)**2)
       end do
       ! Return max CFL
       cfl=max(this%CFLc_x,this%CFLc_y,this%CFLc_z,this%CFLa_x,this%CFLa_y,this%CFLa_z,this%CFLv_x,this%CFLv_y,this%CFLv_z)
@@ -1094,7 +1182,7 @@ contains
       end do
 
       ! Conserved integrals at base level
-      dV=this%amr%dx(0)*this%amr%dy(0)*this%amr%dz(0)
+      dV=this%amr%cell_vol(0)
       do n=1,this%Q%ncomp
          this%Qint(n)=this%Q%get_sum(lvl=0,comp=n)*dV
       end do
@@ -1115,11 +1203,11 @@ contains
          this%rhoKint=0.0_WP
          do lvl=0,this%amr%clvl()
             ! Get cell volume
-            dV=this%amr%dx(lvl)*this%amr%dy(lvl)*this%amr%dz(lvl)
+            dV=this%amr%cell_vol(lvl)
             ! Build fine mask for this level (if not finest)
             if (lvl.lt.this%amr%clvl()) then
                call amrex_imultifab_build(mask,this%amr%ba(lvl),this%amr%dm(lvl),1,0)
-               call amrmask_make_fine(mask,this%amr%ba(lvl+1),[this%amr%rref(lvl),this%amr%rref(lvl),this%amr%rref(lvl)],0,1)
+               call amrmask_make_fine(mask,this%amr%ba(lvl+1),[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],0,1)
             end if
             ! Loop over tiles
             call this%amr%mfiter_build(lvl,mfi)
@@ -1168,12 +1256,15 @@ contains
    end subroutine register_checkpoint
 
    !> Restore solver data from checkpoint
-   subroutine restore_checkpoint(this,io,dirname)
+   subroutine restore_checkpoint(this,io,dirname,time)
       use amrio_class, only: amrio
       implicit none
       class(amrcomp), intent(inout) :: this
       class(amrio), intent(inout) :: io
       character(len=*), intent(in) :: dirname
+      real(WP), intent(in) :: time
       call io%read_data(dirname,this%Q,'Q')
+      ! Fill ghost cells (IO reads valid data only)
+      call this%Q%fill(time=time)
    end subroutine restore_checkpoint
 end module amrcomp_class

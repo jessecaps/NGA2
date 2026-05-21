@@ -61,14 +61,14 @@ contains
 
 
    !> Custom tagging callback: refine where SC > threshold
-   subroutine scalar_tagger(solver, lvl, tags_ptr, time)
+   subroutine scalar_tagger(solver, lvl, time, tags_ptr)
       use iso_c_binding,    only: c_ptr, c_char
       use amrex_amr_module, only: amrex_tagboxarray
       use amrgrid_class,    only: SETtag
       class(amrscalar), intent(inout) :: solver
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
@@ -324,7 +324,7 @@ contains
          integer :: read_step
          call io%read_header('checkpoint_test', read_time, read_step)
          call io%get_scalar('dt', read_dt)
-         call sc%restore_checkpoint(io, 'checkpoint_test')
+         call sc%restore_checkpoint(io, 'checkpoint_test', read_time)
          call log("  Read checkpoint: time="//trim(rtoa(read_time))//" step="//trim(itoa(read_step))//" dt="//trim(rtoa(read_dt)))
       end block
 

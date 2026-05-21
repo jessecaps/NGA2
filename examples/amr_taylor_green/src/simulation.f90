@@ -142,14 +142,14 @@ contains
    end subroutine user_init
 
    !> Tagger for this case based on velocity gradient (turbulence) and divergence (shocks)
-   subroutine my_tagger(solver,lvl,tags_ptr,time)
+   subroutine my_tagger(solver,lvl,time,tags_ptr)
       use iso_c_binding,    only: c_ptr,c_char
       use amrex_amr_module, only: amrex_mfiter,amrex_box,amrex_tagboxarray
       use amrgrid_class,    only: SETtag
       class(amrcomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
@@ -188,9 +188,9 @@ contains
             ! Divergence (only compression, i.e., negative divergence)
             div_neg=min(dudx+dvdy+dwdz,0.0_WP)
             ! Local cell Reynolds for turbulence
-            Rec=rho*vort_mag*min(dx,dy,dz)**2/mu
+            Rec=rho*vort_mag*solver%amr%min_meshsize(lvl)**2/mu
             ! Local cell Reynolds for shocks
-            Res=rho*abs(div_neg)*min(dx,dy,dz)**2/mu
+            Res=rho*abs(div_neg)*solver%amr%min_meshsize(lvl)**2/mu
             ! Tag based on either criterion
             if (Rec.gt.Rec_tag.or.Res.gt.Res_tag) tagarr(i,j,k,1)=SETtag
          end do; end do; end do
@@ -273,8 +273,7 @@ contains
          ! Compute viscosities
          call get_viscosities()
          ! Add artificial bulk viscosity
-         call fs%get_viscartif(dt=time%dt,beta=fs%beta)
-         call fs%beta%multiply(src=fs%Q,srccomp=1)
+         call fs%add_viscartif(dt=time%dt)
       end block init_regridding
       
       ! Initialize visualization
@@ -414,8 +413,7 @@ contains
          call get_viscosities()
 
          ! Add artificial bulk viscosity
-         call fs%get_viscartif(dt=time%dt,beta=fs%beta)
-         call fs%beta%multiply(src=fs%Q,srccomp=1)
+         call fs%add_viscartif(dt=time%dt)
          
          ! Visualization output
          if (viz_evt%occurs()) call viz%write(time%t)

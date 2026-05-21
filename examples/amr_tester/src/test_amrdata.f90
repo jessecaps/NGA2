@@ -36,15 +36,15 @@ module mod_test_amrdata
 contains
 
    !> Tagger: tag bottom-left corner for refinement
-   subroutine corner_tagger(ctx, lvl, tags_ptr, time)
+   subroutine corner_tagger(ctx, lvl, time, tags_ptr)
       use iso_c_binding, only: c_ptr, c_f_pointer, c_char
       use amrex_amr_module, only: amrex_tagboxarray, amrex_mfiter, amrex_box
       use amrgrid_class, only: SETtag
       implicit none
       type(c_ptr), intent(in) :: ctx
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrgrid), pointer :: amr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
@@ -79,7 +79,7 @@ contains
 
    !> Tagger: tag cells where scalar value exceeds threshold
    !> Context is amrdata pointer - demonstrates value-based refinement
-   subroutine value_tagger(ctx, lvl, tags_ptr, time)
+   subroutine value_tagger(ctx, lvl, time, tags_ptr)
       use iso_c_binding, only: c_ptr, c_f_pointer, c_char, c_associated
       use amrex_amr_module, only: amrex_tagboxarray, amrex_mfiter, amrex_mfiter_build, &
       &                           amrex_mfiter_destroy, amrex_box
@@ -87,8 +87,8 @@ contains
       implicit none
       type(c_ptr), intent(in) :: ctx
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrdata), pointer :: data
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi

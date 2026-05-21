@@ -5,13 +5,14 @@ module amrdata_class
    use string,           only: str_medium
    use amrgrid_class,    only: amrgrid
    use amrex_amr_module, only: amrex_multifab,amrex_boxarray,amrex_distromap,&
-   &                           amrex_multifab_build,amrex_multifab_destroy,amrex_geometry,&
+   &                           amrex_geometry,amrex_interp_pc,amrex_bc_foextrap,&
    &                           amrex_interp_cell_cons,amrex_interp_face_linear,amrex_interp_node_bilinear
    implicit none
    private
 
    public :: amrdata
    public :: amrdata_on_init,amrdata_on_coarse,amrdata_on_remake,amrdata_on_clear,amrdata_fillbc
+   public :: amrex_interp_pc,amrex_bc_foextrap,amrex_interp_cell_cons,amrex_interp_face_linear,amrex_interp_node_bilinear
    public :: default_fillbc
 
    ! Special interpolation modes for amrdata
@@ -33,14 +34,16 @@ module amrdata_class
       logical :: nodal(3) = [.false., .false., .false.]    !< false=cell, true=vertex in that direction
       integer :: interp=amrex_interp_cell_cons             !< Interpolation method
       integer, dimension(:,:), allocatable :: lo_bc,hi_bc  !< Boundary conditions: lo_bc(3,ncomp), hi_bc(3,ncomp)
+      ! Cache level index for fillbc callback
+      integer :: fill_lvl_cache=-1
       ! Callback pointers (set to defaults in initialize)
-      procedure(on_init_iface),   pointer, nopass :: on_init   => null()
-      procedure(on_coarse_iface), pointer, nopass :: on_coarse => null()
-      procedure(on_remake_iface), pointer, nopass :: on_remake => null()
-      procedure(on_clear_iface),  pointer, nopass :: on_clear  => null()
-      procedure(fillbc_iface),    pointer, nopass :: fillbc    => null()
+      procedure(on_init_iface),   pointer, pass :: on_init   => null()
+      procedure(on_coarse_iface), pointer, pass :: on_coarse => null()
+      procedure(on_remake_iface), pointer, pass :: on_remake => null()
+      procedure(on_clear_iface),  pointer, pass :: on_clear  => null()
+      procedure(fillbc_iface),    pointer, pass :: fillbc    => null()
       ! User-provided initialization callback
-      procedure(on_init_iface),   pointer, nopass :: user_init => null()
+      procedure(on_init_iface),   pointer, pass :: user_init => null()
    contains
       ! Lifecycle methods
       procedure :: initialize       !< Initialize amrdata with amrgrid and parameters
@@ -56,12 +59,17 @@ module amrdata_class
       procedure :: fill_mfab        !< Fill into a target MultiFab (single level)
       procedure :: sync_lvl         !< Lightweight same-level ghost sync (single level)
       procedure :: sync             !< Lightweight ghost sync on all levels
+      procedure :: syncsum_lvl      !< Same-level ghost-to-valid accumulation (single level)
+      procedure :: syncsum          !< Ghost-to-valid accumulation on all levels
       procedure :: average_down     !< Average from finest to coarsest level
       procedure :: average_downto   !< Average level lvl+1 down to level lvl
+      procedure :: sum_down         !< Restrict-SUM from finest to coarsest level
+      procedure :: sum_downto       !< Restrict-SUM level lvl+1 into level lvl
       ! Scalar operations (Y = op(Y, scalar))
       procedure :: setval           !< Y = val
       procedure :: plus             !< Y = Y + val
       procedure :: mult             !< Y = Y * val
+      procedure :: clip             !< Y = clip(Y, minval, maxval)
       ! Binary operations (Y = op(Y, X))
       procedure :: add              !< Y = Y + X
       procedure :: subtract         !< Y = Y - X
@@ -79,9 +87,11 @@ module amrdata_class
       procedure :: norm1            !< L1 norm at level
       procedure :: norm2            !< L2 norm at level
       ! Vector operations
-      procedure :: get_magnitude    !< C = sqrt(A²+B²+C²) from 3 sources
+      procedure :: get_magnitude    !< M = sqrt(srcX(compX)²+srcY(compY)²+srcZ(compZ)²), comps default to 1
       ! Iteration helper
       procedure :: mfiter_build     !< Build MFIter from this data's MultiFab
+      ! Cloning
+      procedure :: clone            !< Clone amrdata with optional alternate DM per level
    end type amrdata
 
    !> Abstract interface for on_init callback
@@ -191,6 +201,7 @@ contains
 
    !> Finalize the amrdata object
    subroutine finalize(this)
+      use amrex_amr_module, only: amrex_multifab_destroy
       class(amrdata), intent(inout) :: this
       integer :: i
       ! Destroy all MultiFabs
@@ -237,6 +248,7 @@ contains
 
    !> Reset mfab on a level given new BoxArray and DistroMap
    subroutine reset_level(this,lvl,ba,dm)
+      use amrex_amr_module, only: amrex_multifab_build,amrex_multifab_destroy
       class(amrdata), intent(inout) :: this
       integer, intent(in) :: lvl
       type(amrex_boxarray),  intent(in) :: ba
@@ -247,6 +259,7 @@ contains
 
    !> Destroy mfab on a level
    subroutine clear_level(this,lvl)
+      use amrex_amr_module, only: amrex_multifab_destroy
       class(amrdata), intent(inout) :: this
       integer, intent(in) :: lvl
       call amrex_multifab_destroy(this%mf(lvl))
@@ -310,7 +323,7 @@ contains
          call this%mf(lvl)%setval(0.0_WP)
       end select
       ! User-provided initialization (called for all modes except none without user_init)
-      if (associated(this%user_init)) call this%user_init(this, lvl, time, ba, dm)
+      if (associated(this%user_init)) call this%user_init(lvl, time, ba, dm)
    end subroutine default_on_init
 
    !> Default on_coarse: reset level and fill based on interp mode
@@ -328,7 +341,7 @@ contains
          ! Workspace mode: just allocate, don't fill
        case (amrex_interp_reinit)
          ! Reinit mode: call user_init instead of interpolating
-         if (associated(this%user_init)) call this%user_init(this, lvl, time, ba, dm)
+         if (associated(this%user_init)) call this%user_init(lvl, time, ba, dm)
        case default
          ! Standard interpolation: fill from coarse
          call this%fill_from_coarse(lvl, time)
@@ -352,7 +365,7 @@ contains
        case (amrex_interp_reinit)
          ! Reinit mode: reallocate and call user_init
          call this%reset_level(lvl, ba, dm)
-         if (associated(this%user_init)) call this%user_init(this, lvl, time, ba, dm)
+         if (associated(this%user_init)) call this%user_init(lvl, time, ba, dm)
        case default
          ! Standard interpolation: FillPatch old data into new layout
          ! Build temp MultiFab with new layout (0 ghost cells for FillPatch)
@@ -391,7 +404,7 @@ contains
       mf = mf_ptr
       geom = geom_ptr
       ! Call the fillbc callback
-      call this%fillbc(this, mf, int(scomp), int(ncomp), real(time, WP), geom)
+      call this%fillbc(mf, int(scomp), int(ncomp), real(time, WP), geom)
    end subroutine amrdata_fillbc
 
    !> Dispatch callback for on_init
@@ -404,7 +417,7 @@ contains
       type(amrex_distromap), intent(in) :: dm
       type(amrdata), pointer :: this
       call c_f_pointer(ctx, this)
-      call this%on_init(this, lvl, time, ba, dm)
+      call this%on_init(lvl, time, ba, dm)
    end subroutine amrdata_on_init
 
    !> Dispatch callback for on_coarse
@@ -417,7 +430,7 @@ contains
       type(amrex_distromap), intent(in) :: dm
       type(amrdata), pointer :: this
       call c_f_pointer(ctx, this)
-      call this%on_coarse(this, lvl, time, ba, dm)
+      call this%on_coarse(lvl, time, ba, dm)
    end subroutine amrdata_on_coarse
 
    !> Dispatch callback for on_remake
@@ -430,7 +443,7 @@ contains
       type(amrex_distromap), intent(in) :: dm
       type(amrdata), pointer :: this
       call c_f_pointer(ctx, this)
-      call this%on_remake(this, lvl, time, ba, dm)
+      call this%on_remake(lvl, time, ba, dm)
    end subroutine amrdata_on_remake
 
    !> Dispatch callback for on_clear
@@ -440,7 +453,7 @@ contains
       integer, intent(in) :: lvl
       type(amrdata), pointer :: this
       call c_f_pointer(ctx, this)
-      call this%on_clear(this, lvl)
+      call this%on_clear(lvl)
    end subroutine amrdata_on_clear
 
    !> Fill fine level from coarse only (for creating new fine levels)
@@ -462,9 +475,10 @@ contains
       end select
       bc_dispatch_ptr = c_funloc(amrdata_fillbc)
       ! Call C++ wrapper
+      this%fill_lvl_cache=lvl ! Cache current level
       call amrmfab_fillcoarsepatch(this%mf(lvl), time, this%mf(lvl-1), &
       &   this%amr%geom(lvl-1), this%amr%geom(lvl), data_ctx, bc_dispatch_ptr, &
-      &   1, 1, this%ncomp, this%amr%rref(lvl-1), this%interp, this%lo_bc, this%hi_bc, this%ncomp)
+      &   1, 1, this%ncomp, [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)], this%interp, this%lo_bc, this%hi_bc, this%ncomp)
    end subroutine fill_from_coarse
 
    !> Fill ghost cells and coarse-fine boundary data at a single level
@@ -489,6 +503,7 @@ contains
       end select
       bc_dispatch_ptr = c_funloc(amrdata_fillbc)
       ! Call appropriate FillPatch (scomp/dcomp use 1-indexed Fortran convention)
+      this%fill_lvl_cache=lvl ! Cache current level
       if (lvl .eq. 0) then
          call amrmfab_fillpatch_single(this%mf(0), t_old, this%mf(0), &
          &   t_new, this%mf(0), this%amr%geom(0), data_ctx, bc_dispatch_ptr, &
@@ -498,25 +513,27 @@ contains
          &   t_new, this%mf(lvl-1), this%amr%geom(lvl-1), &
          &   t_old, this%mf(lvl), t_new, this%mf(lvl), this%amr%geom(lvl), &
          &   data_ctx, bc_dispatch_ptr, time, 1, 1, this%ncomp, &
-         &   this%amr%rref(lvl-1), this%interp, this%lo_bc, this%hi_bc, this%ncomp)
+         &   [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)], this%interp, this%lo_bc, this%hi_bc, this%ncomp)
       end if
       ! For nodal/face data: reconcile shared valid faces
       if (any(this%nodal)) call this%mf(lvl)%override_sync(this%amr%geom(lvl))
    end subroutine fill_lvl
 
    !> Fill ghost cells and coarse-fine boundary data on all levels
-   subroutine fill(this, time)
+   subroutine fill(this,time,lbase)
       implicit none
       class(amrdata), intent(inout) :: this
       real(WP), intent(in) :: time
-      integer :: lvl
-      do lvl = 0, this%amr%clvl()
-         call this%fill_lvl(lvl, time)
+      integer, intent(in), optional :: lbase
+      integer :: lvl,lb
+      lb=0; if (present(lbase)) lb=lbase
+      do lvl=lb,this%amr%clvl()
+         call this%fill_lvl(lvl,time)
       end do
    end subroutine fill
 
    !> Fill into a target MultiFab from this amrdata (for regrid callbacks)
-   subroutine fill_mfab(this, dest, lvl, time)
+   subroutine fill_mfab(this,dest,lvl,time)
       use iso_c_binding, only: c_loc, c_funloc, c_funptr, c_ptr
       use amrex_amr_module, only: amrex_multifab
       use amrex_interface, only: amrmfab_fillpatch_single, amrmfab_fillpatch_two
@@ -537,6 +554,7 @@ contains
       end select
       bc_dispatch_ptr = c_funloc(amrdata_fillbc)
       ! Call appropriate FillPatch
+      this%fill_lvl_cache=lvl ! Cache current level
       if (lvl .eq. 0) then
          call amrmfab_fillpatch_single(dest, t_old, this%mf(0), &
          &   t_new, this%mf(0), this%amr%geom(0), data_ctx, bc_dispatch_ptr, &
@@ -546,7 +564,7 @@ contains
          &   t_new, this%mf(lvl-1), this%amr%geom(lvl-1), &
          &   t_old, this%mf(lvl), t_new, this%mf(lvl), this%amr%geom(lvl), &
          &   data_ctx, bc_dispatch_ptr, time, 1, 1, this%ncomp, &
-         &   this%amr%rref(lvl-1), this%interp, this%lo_bc, this%hi_bc, this%ncomp)
+         &   [this%amr%rrefx(lvl-1),this%amr%rrefy(lvl-1),this%amr%rrefz(lvl-1)], this%interp, this%lo_bc, this%hi_bc, this%ncomp)
       end if
       ! For nodal/face data: reconcile shared valid faces
       if (any(this%nodal)) call dest%override_sync(this%amr%geom(lvl))
@@ -565,24 +583,47 @@ contains
    end subroutine sync_lvl
 
    !> Lightweight same-level ghost sync on all levels
-   subroutine sync(this)
+   subroutine sync(this,lbase)
       implicit none
       class(amrdata), intent(inout) :: this
-      integer :: lvl
-      do lvl = 0, this%amr%clvl()
+      integer, intent(in), optional :: lbase
+      integer :: lvl,lb
+      lb=0; if (present(lbase)) lb=lbase
+      do lvl=lb,this%amr%clvl()
          call this%sync_lvl(lvl)
       end do
    end subroutine sync
 
-   !> Average down from finest level to coarsest (ensures level consistency)
-   !> Simply calls average_downto in a loop from finest to coarsest
-   subroutine average_down(this)
+   !> Same-level ghost-to-valid accumulation at a single level (SumBoundary, no C/F)
+   subroutine syncsum_lvl(this,lvl)
       implicit none
       class(amrdata), intent(inout) :: this
-      integer :: lvl
-      if (.not.associated(this%amr)) return
+      integer, intent(in) :: lvl
+      call this%mf(lvl)%sum_boundary(this%amr%geom(lvl))
+   end subroutine syncsum_lvl
+
+   !> Same-level ghost-to-valid accumulation on all levels
+   subroutine syncsum(this,lbase)
+      implicit none
+      class(amrdata), intent(inout) :: this
+      integer, intent(in), optional :: lbase
+      integer :: lvl,lb
+      lb=0; if (present(lbase)) lb=lbase
+      do lvl=lb,this%amr%clvl()
+         call this%syncsum_lvl(lvl)
+      end do
+   end subroutine syncsum
+
+   !> Average down from finest level to lbase (ensures level consistency)
+   !> Simply calls average_downto in a loop from finest to coarsest
+   subroutine average_down(this,lbase)
+      implicit none
+      class(amrdata), intent(inout) :: this
+      integer, intent(in), optional :: lbase
+      integer :: lvl,lb
+      lb=0; if (present(lbase)) lb=lbase
       ! Loop from finest to coarsest
-      do lvl = this%amr%clvl()-1, 0, -1
+      do lvl=this%amr%clvl()-1,lb,-1
          call this%average_downto(lvl)
       end do
    end subroutine average_down
@@ -592,28 +633,51 @@ contains
    !> - nodal_count=1 (face): amrmfab_average_down_face
    !> - nodal_count=2 (edge): amrmfab_average_down_edge
    !> - nodal_count=3 (node): amrmfab_average_down_node
-   subroutine average_downto(this, lvl)
-      use amrex_interface, only: amrmfab_average_down_cell, amrmfab_average_down_face, &
-      &                          amrmfab_average_down_edge, amrmfab_average_down_node
+   subroutine average_downto(this,lvl)
+      use messager, only: die
+      use amrex_interface, only: amrmfab_average_down_cell,amrmfab_average_down_face, &
+      &                          amrmfab_average_down_edge,amrmfab_average_down_node
       implicit none
       class(amrdata), intent(inout) :: this
       integer, intent(in) :: lvl
-      integer :: nodal_count
-      if (.not.associated(this%amr)) return
-      if (lvl.lt.0 .or. lvl.ge.this%amr%clvl()) return
-      nodal_count = count(this%nodal)
+      ! Check that level is valid
+      if (lvl.lt.0.or.lvl.ge.this%amr%clvl()) call die('[amrdata average_downto] invalid level provided')
       ! Pass geometry for periodic fix-up
-      select case (nodal_count)
+      select case (count(this%nodal))
        case (0) ! Cell-centered
-         call amrmfab_average_down_cell(fmf=this%mf(lvl+1), cmf=this%mf(lvl), rr=this%amr%rref(lvl), cgeom=this%amr%geom(lvl))
+         call amrmfab_average_down_cell(fmf=this%mf(lvl+1),cmf=this%mf(lvl),rr=[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],cgeom=this%amr%geom(lvl))
        case (1) ! Face-centered
-         call amrmfab_average_down_face(fmf=this%mf(lvl+1), cmf=this%mf(lvl), rr=this%amr%rref(lvl), cgeom=this%amr%geom(lvl))
+         call amrmfab_average_down_face(fmf=this%mf(lvl+1),cmf=this%mf(lvl),rr=[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],cgeom=this%amr%geom(lvl))
        case (2) ! Edge-centered
-         call amrmfab_average_down_edge(fmf=this%mf(lvl+1), cmf=this%mf(lvl), rr=this%amr%rref(lvl), cgeom=this%amr%geom(lvl))
+         call amrmfab_average_down_edge(fmf=this%mf(lvl+1),cmf=this%mf(lvl),rr=[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],cgeom=this%amr%geom(lvl))
        case (3) ! Node-centered
-         call amrmfab_average_down_node(fmf=this%mf(lvl+1), cmf=this%mf(lvl), rr=this%amr%rref(lvl), cgeom=this%amr%geom(lvl))
+         call amrmfab_average_down_node(fmf=this%mf(lvl+1),cmf=this%mf(lvl),rr=[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],cgeom=this%amr%geom(lvl))
       end select
    end subroutine average_downto
+
+   !> Restrict-SUM all fine deposits (valid+ghost) into the coarse level.
+   !> Mirrors AMReX's sumFineToCrseNodal. lvl is the coarse destination; lvl+1 is the source.
+   subroutine sum_downto(this,lvl)
+      use amrex_interface, only: amrmfab_sum_downto
+      use messager, only: die
+      implicit none
+      class(amrdata), intent(inout) :: this
+      integer, intent(in) :: lvl
+      if (lvl.lt.0.or.lvl.ge.this%amr%clvl()) call die('[amrdata sum_downto] invalid level')
+      call amrmfab_sum_downto(this%mf(lvl+1),this%mf(lvl),[this%amr%rrefx(lvl),this%amr%rrefy(lvl),this%amr%rrefz(lvl)],cgeom=this%amr%geom(lvl),fgeom=this%amr%geom(lvl+1))
+   end subroutine sum_downto
+
+   !> Restrict-SUM from finest to coarsest, looping lvl=clvl()-1 down to 0
+   subroutine sum_down(this,lbase)
+      implicit none
+      class(amrdata), intent(inout) :: this
+      integer, intent(in), optional :: lbase
+      integer :: lvl,lb
+      lb=0; if (present(lbase)) lb=lbase
+      do lvl=this%amr%clvl()-1,lb,-1
+         call this%sum_downto(lvl)
+      end do
+   end subroutine sum_down
 
    ! ============================================================================
    ! SCALAR OPERATIONS
@@ -764,6 +828,40 @@ contains
       end do
    end subroutine copy
 
+   !> Clip values: Y = max(cliplo, min(cliphi, Y))
+   subroutine clip(this, cliplo, cliphi, lvl, lbase, comp, ncomp, nghost)
+      use amrex_amr_module, only: amrex_mfiter, amrex_mfiter_build, amrex_mfiter_destroy, amrex_box
+      implicit none
+      class(amrdata), intent(inout) :: this
+      real(WP), intent(in), optional :: cliplo, cliphi
+      integer, intent(in), optional :: lvl, lbase, comp, ncomp, nghost
+      type(amrex_mfiter) :: mfi
+      type(amrex_box) :: bx
+      real(WP), dimension(:,:,:,:), contiguous, pointer :: p
+      real(WP) :: lo, hi
+      integer :: i, j, k, n, l, l0, l1, ic, nc, ng
+      if (.not.associated(this%amr)) return
+      lo = -huge(1.0_WP); if (present(cliplo)) lo = cliplo
+      hi = +huge(1.0_WP); if (present(cliphi)) hi = cliphi
+      call get_level_range(this, lvl, lbase, l0, l1)
+      ic = 1; if (present(comp)) ic = comp
+      nc = this%ncomp; if (present(ncomp)) nc = ncomp
+      ng = this%ng; if (present(nghost)) ng = nghost
+      do l = l0, l1
+         call amrex_mfiter_build(mfi, this%mf(l), tiling=.true.)
+         do while (mfi%next())
+            p => this%mf(l)%dataptr(mfi)
+            bx = mfi%growntilebox(ng)
+            do n = ic, ic+nc-1
+               do k = bx%lo(3), bx%hi(3); do j = bx%lo(2), bx%hi(2); do i = bx%lo(1), bx%hi(1)
+                  p(i,j,k,n) = max(lo, min(hi, p(i,j,k,n)))
+               end do; end do; end do
+            end do
+         end do
+         call amrex_mfiter_destroy(mfi)
+      end do
+   end subroutine clip
+
    ! ============================================================================
    ! BLAS-LIKE OPERATIONS
    ! ============================================================================
@@ -890,15 +988,19 @@ contains
    end function norm2
 
    !> Compute magnitude: this = sqrt(srcX² + srcY² + srcZ²)
-   subroutine get_magnitude(this,srcX,srcY,srcZ,nghost)
+   subroutine get_magnitude(this,srcX,srcY,srcZ,compX,compY,compZ,nghost)
       use amrex_amr_module, only: amrex_mfiter,amrex_mfiter_build,amrex_mfiter_destroy,amrex_box
       class(amrdata), intent(inout) :: this
       class(amrdata), intent(in) :: srcX,srcY,srcZ
+      integer, intent(in), optional :: compX,compY,compZ
       integer, intent(in), optional :: nghost
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
       real(WP), dimension(:,:,:,:), contiguous, pointer :: pM,pX,pY,pZ
-      integer :: i,j,k,n,lvl,ng
+      integer :: i,j,k,lvl,ng,cx,cy,cz
+      cx=1; if (present(compX)) cx=compX
+      cy=1; if (present(compY)) cy=compY
+      cz=1; if (present(compZ)) cz=compZ
       ng=min(this%ng,srcX%ng,srcY%ng,srcZ%ng); if (present(nghost)) ng=nghost
       do lvl=0,this%amr%clvl()
          call amrex_mfiter_build(mfi,this%mf(lvl),tiling=.true.)
@@ -910,15 +1012,59 @@ contains
             pZ=>srcZ%mf(lvl)%dataptr(mfi)
             ! Loop over grown tile
             bx=mfi%growntilebox(ng)
-            do n=1,this%ncomp
-               do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
-                  pM(i,j,k,n)=sqrt(pX(i,j,k,n)**2+pY(i,j,k,n)**2+pZ(i,j,k,n)**2)
-               end do; end do; end do
-            end do
+            do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
+               pM(i,j,k,1)=sqrt(pX(i,j,k,cx)**2+pY(i,j,k,cy)**2+pZ(i,j,k,cz)**2)
+            end do; end do; end do
          end do
          call amrex_mfiter_destroy(mfi)
       end do
    end subroutine get_magnitude
+
+   ! ============================================================================
+   ! CLONING
+   ! ============================================================================
+
+   !> Clone this amrdata into dest, optionally using alternate DMs per level
+   !> All class members are fully populated. MultiFabs are built and parallel_copied.
+   subroutine clone(this,dest,dm)
+      use amrex_amr_module, only: amrex_multifab_build
+      use messager, only: die
+      implicit none
+      class(amrdata), intent(in) :: this
+      type(amrdata), intent(inout) :: dest
+      type(amrex_distromap), dimension(0:), intent(in), optional :: dm
+      integer :: lvl
+      ! Copy all metadata
+      dest%amr   =>this%amr
+      dest%parent=>this%parent
+      dest%name  =trim(this%name)//'_clone'
+      dest%ncomp =this%ncomp
+      dest%ng    =this%ng
+      dest%nodal =this%nodal
+      dest%interp=this%interp
+      dest%fill_lvl_cache=this%fill_lvl_cache
+      ! Copy BCs
+      if (allocated(this%lo_bc)) allocate(dest%lo_bc,source=this%lo_bc)
+      if (allocated(this%hi_bc)) allocate(dest%hi_bc,source=this%hi_bc)
+      ! Copy callbacks
+      dest%on_init  =>this%on_init
+      dest%on_coarse=>this%on_coarse
+      dest%on_remake=>this%on_remake
+      dest%on_clear =>this%on_clear
+      dest%fillbc   =>this%fillbc
+      dest%user_init=>this%user_init
+      ! Build MultiFabs on alternate or same DM, parallel_copy data
+      if (present(dm)) then
+         if (size(dm).lt.size(this%mf)) call die('[amrdata clone] dm array too small for number of levels')
+      end if
+      allocate(dest%mf(lbound(this%mf,1):ubound(this%mf,1)))
+      do lvl=lbound(this%mf,1),ubound(this%mf,1)
+         if (present(dm)) then; call amrex_multifab_build(dest%mf(lvl),this%amr%ba(lvl),         dm(lvl),this%ncomp,this%ng,this%nodal)
+         else;                  call amrex_multifab_build(dest%mf(lvl),this%amr%ba(lvl),this%amr%dm(lvl),this%ncomp,this%ng,this%nodal)
+         end if
+         call dest%mf(lvl)%parallel_copy(this%mf(lvl),1,1,this%ncomp,this%ng,this%ng,this%amr%geom(lvl))
+      end do
+   end subroutine clone
 
    ! ============================================================================
    ! HELPER ROUTINES

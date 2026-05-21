@@ -23,6 +23,9 @@ module amrex_interface
    public :: amrcore_set_on_clear_dispatch
    public :: amrcore_set_on_tag_dispatch
    public :: amrcore_set_on_postregrid_dispatch
+   public :: amrcore_set_on_cost_dispatch
+   public :: amrcore_set_cost_strategy
+   public :: amrdm_make_knapsack,amrdm_make_sfc
 
    !=====================================================================
    ! AmrCore Grid Operations
@@ -36,12 +39,14 @@ module amrex_interface
    public :: amrcore_finest_level
    public :: amrcore_get_geometry
    public :: amrcore_get_ref_ratio
+   public :: amrcore_get_ref_ratio_xyz
    public :: amrcore_get_boxarray
    public :: amrcore_get_distromap
 
    !=====================================================================
    ! FillPatch Operations
    !=====================================================================
+   public :: amrmfab_parallel_add
    public :: amrmfab_fillpatch_single
    public :: amrmfab_fillpatch_two
    public :: amrmfab_fillcoarsepatch
@@ -64,12 +69,17 @@ module amrex_interface
    public :: amrcheckpoint_mfab_prefix
    public :: amrvismf_set_noutfiles
    public :: amrvismf_get_noutfiles
+   public :: amrcore_build_level
+   public :: amrcore_set_finest_level
 
    !=====================================================================
    ! MLMG Utilities
    !=====================================================================
    public :: amrmlmg_get_niters
    public :: amrmlmg_get_fluxes
+   public :: amrmlmg_dot_composite
+   public :: amrpoisson_build
+   public :: amrabeclap_build
 
    !=====================================================================
    ! MultiFab Averaging (unified API - not in AMReX Fortran interface)
@@ -78,9 +88,19 @@ module amrex_interface
    public :: amrmfab_average_down_face  ! Face-centered (nodal in 1 dir)
    public :: amrmfab_average_down_edge  ! Edge-centered (nodal in 2 dirs)
    public :: amrmfab_average_down_node  ! Node-centered (nodal in 3 dirs)
+   public :: amrmfab_sum_downto         ! Restrict-SUM fine deposits into coarse level (lvl+1 → lvl)
+   public :: amrmfab_interp_from_coarse ! PCInterp coarse→fine for deposit processing
    public :: amrmfab_compute_divergence ! Compute div(u) from face velocities
    public :: amrmfab_sum_unique         ! Sum for face/nodal data (no double-counting)
    public :: amrmask_make_fine          ! Create mask for cells covered by finer level
+
+   !=====================================================================
+   ! Per-direction wrappers (bypass AMReX scalar-only Fortran interfaces)
+   !=====================================================================
+   public :: amrfluxreg_build           ! FluxRegister build with IntVect ratio
+   public :: amrfluxreg_destroy         ! FluxRegister destroy
+   public :: amrmfab_average_down_faces ! average_down_faces with IntVect ratio
+   public :: amrlinop_set_coarse_fine_bc ! linop set_coarse_fine_bc with IntVect ratio
 
    interface
 
@@ -151,6 +171,43 @@ module amrex_interface
          type(c_funptr), value :: f
       end subroutine amrcore_set_on_postregrid_dispatch
 
+      !> Set cost callback dispatcher for load balancing
+      subroutine amrcore_set_on_cost_dispatch(core,f) bind(c)
+         import :: c_ptr,c_funptr
+         type(c_ptr), value :: core
+         type(c_funptr), value :: f
+      end subroutine amrcore_set_on_cost_dispatch
+
+      !> Set load balancing strategy (0=SFC, 1=KnapSack)
+      subroutine amrcore_set_cost_strategy(core,strat) bind(c)
+         import :: c_ptr,c_int
+         type(c_ptr), value :: core
+         integer(c_int), value :: strat
+      end subroutine amrcore_set_cost_strategy
+
+      !> Build a KnapSack-optimized DistributionMapping from per-box costs
+      subroutine amrdm_make_knapsack_c(dm,costs,nboxes) bind(c,name='amrdm_make_knapsack')
+         import :: c_ptr,c_int,c_double
+         type(c_ptr) :: dm
+         real(c_double) :: costs(*)
+         integer(c_int), value :: nboxes
+      end subroutine amrdm_make_knapsack_c
+
+      !> Build an SFC-optimized DistributionMapping from per-box costs + BoxArray
+      subroutine amrdm_make_sfc_c(dm,costs,nboxes,ba) bind(c,name='amrdm_make_sfc')
+         import :: c_ptr,c_int,c_double
+         type(c_ptr) :: dm
+         real(c_double) :: costs(*)
+         integer(c_int), value :: nboxes
+         type(c_ptr), value :: ba
+      end subroutine amrdm_make_sfc_c
+
+      !> Destroy a heap-allocated DistributionMapping
+      subroutine amrdm_destroy_c(dm) bind(c,name='amrdm_destroy')
+         import :: c_ptr
+         type(c_ptr), value :: dm
+      end subroutine amrdm_destroy_c
+
       !------------------------------------------------------------------
       ! AmrCore Grid Operations
       !------------------------------------------------------------------
@@ -195,6 +252,13 @@ module amrex_interface
          type(c_ptr), value :: core
       end subroutine amrcore_get_ref_ratio
 
+      !> Get per-direction refinement ratios
+      subroutine amrcore_get_ref_ratio_xyz(rrefx,rrefy,rrefz,core) bind(c)
+         import :: c_ptr
+         integer, dimension(*), intent(inout) :: rrefx,rrefy,rrefz
+         type(c_ptr), value :: core
+      end subroutine amrcore_get_ref_ratio_xyz
+
       !> Get BoxArray at a level
       subroutine amrcore_get_boxarray(barray,lev,core) bind(c)
          import :: c_ptr,c_int
@@ -236,7 +300,8 @@ module amrex_interface
          type(c_ptr), value :: mf_old_f,mf_new_f,geom_f,solver_ctx
          type(c_funptr), value :: bc_dispatch
          real(c_double), value :: t_old_c,t_new_c,t_old_f,t_new_f,time
-         integer(c_int), value :: scomp,dcomp,ncomp,ref_ratio,interp_type,nbc
+         integer(c_int), value :: scomp,dcomp,ncomp,interp_type,nbc
+         integer(c_int), intent(in) :: ref_ratio(3)
          integer(c_int), intent(in) :: lo_bc(*),hi_bc(*)
       end subroutine amrmfab_fillpatch_two_c
 
@@ -248,7 +313,8 @@ module amrex_interface
          type(c_ptr), value :: mf_f,mf_c,geom_c,geom_f,solver_ctx
          type(c_funptr), value :: bc_dispatch
          real(c_double), value :: time
-         integer(c_int), value :: scomp,dcomp,ncomp,ref_ratio,interp_type,nbc
+         integer(c_int), value :: scomp,dcomp,ncomp,interp_type,nbc
+         integer(c_int), intent(in) :: ref_ratio(3)
          integer(c_int), intent(in) :: lo_bc(*),hi_bc(*)
       end subroutine amrmfab_fillcoarsepatch_c
 
@@ -266,7 +332,8 @@ module amrex_interface
          type(c_ptr), value :: ctx_u, ctx_v, ctx_w
          type(c_funptr), value :: bc_u, bc_v, bc_w
          real(c_double), value :: time
-         integer(c_int), value :: scomp, dcomp, ncomp, ref_ratio, interp_type
+         integer(c_int), value :: scomp, dcomp, ncomp, interp_type
+         integer(c_int), intent(in) :: ref_ratio(3)
          integer(c_int), intent(in) :: lo_bc(*), hi_bc(*)
       end subroutine amrmfab_fillcoarsepatch_faces_c
 
@@ -289,7 +356,8 @@ module amrex_interface
          type(c_ptr), value :: ctx_u, ctx_v, ctx_w
          type(c_funptr), value :: bc_u, bc_v, bc_w
          real(c_double), value :: time, t_old_c, t_new_c, t_old_f, t_new_f
-         integer(c_int), value :: scomp, dcomp, ncomp, ref_ratio, interp_type
+         integer(c_int), value :: scomp, dcomp, ncomp, interp_type
+         integer(c_int), intent(in) :: ref_ratio(3)
          integer(c_int), intent(in) :: lo_bc(*), hi_bc(*)
       end subroutine amrmfab_fillpatch_two_faces_c
 
@@ -374,6 +442,23 @@ module amrex_interface
          import :: c_int
       end function amrvismf_get_noutfiles
 
+      !> Build a single level from pre-built BoxArray and DistributionMapping
+      subroutine amrcore_build_level(core, lev, time, ba_ptr, dm_ptr) bind(c)
+         import :: c_ptr, c_int, c_double
+         type(c_ptr), value :: core
+         integer(c_int), value :: lev
+         real(c_double), value :: time
+         type(c_ptr), value :: ba_ptr
+         type(c_ptr), value :: dm_ptr
+      end subroutine amrcore_build_level
+
+      !> Set finest_level on AmrCore
+      subroutine amrcore_set_finest_level(core, finest_level) bind(c)
+         import :: c_ptr, c_int
+         type(c_ptr), value :: core
+         integer(c_int), value :: finest_level
+      end subroutine amrcore_set_finest_level
+
       !====================================================================
       ! MLMG Utilities (not available in AMReX Fortran interface)
       !====================================================================
@@ -394,6 +479,68 @@ module amrex_interface
          integer(c_int), value :: nlevs
       end subroutine amrmlmg_get_fluxes
 
+      !> Composite masked dot product over all AMR levels
+      !> Excludes coarse cells covered by finer levels (no double counting)
+      !>   mf1_ptrs, mf2_ptrs - arrays of MultiFab pointers (one per level)
+      !>   ba_fine_ptrs       - BoxArray pointers (ba_fine_ptrs(lev+1) used for mask at lev)
+      !>   ref_ratios         - flattened (rx,ry,rz)*nlevs array
+      !>   nlevs              - total number of AMR levels
+      real(c_double) function amrmlmg_dot_composite(mf1_ptrs, mf2_ptrs, ba_fine_ptrs, ref_ratios, nlevs) bind(c)
+         import :: c_ptr, c_int, c_double
+         type(c_ptr), intent(in) :: mf1_ptrs(*), mf2_ptrs(*), ba_fine_ptrs(*)
+         integer(c_int), intent(in) :: ref_ratios(*)
+         integer(c_int), value :: nlevs
+      end function amrmlmg_dot_composite
+
+      !====================================================================
+      ! Per-direction wrappers (bypass AMReX scalar-only Fortran interfaces)
+      !====================================================================
+
+      subroutine amrfluxreg_build(fr_ptr, ba_ptr, dm_ptr, ref_ratio, fine_lev, ncomp) bind(c)
+         import :: c_ptr, c_int
+         type(c_ptr), intent(out) :: fr_ptr
+         type(c_ptr), value :: ba_ptr, dm_ptr
+         integer(c_int), intent(in) :: ref_ratio(3)
+         integer(c_int), value :: fine_lev, ncomp
+      end subroutine amrfluxreg_build
+
+      subroutine amrfluxreg_destroy(fr_ptr) bind(c)
+         import :: c_ptr
+         type(c_ptr), value :: fr_ptr
+      end subroutine amrfluxreg_destroy
+
+      subroutine amrmfab_average_down_faces(fine_x, fine_y, fine_z, &
+         crse_x, crse_y, crse_z, geom, scomp, ncomp, ref_ratio) bind(c)
+         import :: c_ptr, c_int
+         type(c_ptr), value :: fine_x, fine_y, fine_z
+         type(c_ptr), value :: crse_x, crse_y, crse_z
+         type(c_ptr), value :: geom
+         integer(c_int), value :: scomp, ncomp
+         integer(c_int), intent(in) :: ref_ratio(3)
+      end subroutine amrmfab_average_down_faces
+
+      subroutine amrlinop_set_coarse_fine_bc(linop, crse_mf, ref_ratio) bind(c)
+         import :: c_ptr, c_int
+         type(c_ptr), value :: linop, crse_mf
+         integer(c_int), intent(in) :: ref_ratio(3)
+      end subroutine amrlinop_set_coarse_fine_bc
+
+      !> Build MLPoisson
+      subroutine amrpoisson_build_c(linop, nlevels, geom, ba, dm, semicoarsen, hidden_direction) bind(c, name='amrpoisson_build_c')
+         import :: c_ptr, c_int
+         type(c_ptr), intent(out) :: linop
+         integer(c_int), value :: nlevels, semicoarsen, hidden_direction
+         type(c_ptr), intent(in) :: geom(*), ba(*), dm(*)
+      end subroutine amrpoisson_build_c
+
+      !> Build MLABecLaplacian
+      subroutine amrabeclap_build_c(linop, nlevels, geom, ba, dm, semicoarsen, hidden_direction) bind(c, name='amrabeclap_build_c')
+         import :: c_ptr, c_int
+         type(c_ptr), intent(out) :: linop
+         integer(c_int), value :: nlevels, semicoarsen, hidden_direction
+         type(c_ptr), intent(in) :: geom(*), ba(*), dm(*)
+      end subroutine amrabeclap_build_c
+
       !====================================================================
       ! MultiFab Averaging (C bindings - unified API for all 4 types)
       ! Signature: (fine, crse, geom, ratio, ngcrse)
@@ -404,29 +551,58 @@ module amrex_interface
          bind(c, name='amrmfab_average_down_cell')
          import :: c_ptr, c_int
          type(c_ptr), value :: fine_mf, crse_mf, crse_geom
-         integer(c_int), value :: ref_ratio, ngcrse
+         integer(c_int), intent(in) :: ref_ratio(3)
+         integer(c_int), value :: ngcrse
       end subroutine amrmfab_average_down_cell_c
 
       subroutine amrmfab_average_down_face_c(fine_mf, crse_mf, crse_geom, ref_ratio, ngcrse) &
          bind(c, name='amrmfab_average_down_face')
          import :: c_ptr, c_int
          type(c_ptr), value :: fine_mf, crse_mf, crse_geom
-         integer(c_int), value :: ref_ratio, ngcrse
+         integer(c_int), intent(in) :: ref_ratio(3)
+         integer(c_int), value :: ngcrse
       end subroutine amrmfab_average_down_face_c
 
       subroutine amrmfab_average_down_edge_c(fine_mf, crse_mf, crse_geom, ref_ratio, ngcrse) &
          bind(c, name='amrmfab_average_down_edge')
          import :: c_ptr, c_int
          type(c_ptr), value :: fine_mf, crse_mf, crse_geom
-         integer(c_int), value :: ref_ratio, ngcrse
+         integer(c_int), intent(in) :: ref_ratio(3)
+         integer(c_int), value :: ngcrse
       end subroutine amrmfab_average_down_edge_c
 
       subroutine amrmfab_average_down_node_c(fine_mf, crse_mf, crse_geom, ref_ratio, ngcrse) &
          bind(c, name='amrmfab_average_down_node')
          import :: c_ptr, c_int
          type(c_ptr), value :: fine_mf, crse_mf, crse_geom
-         integer(c_int), value :: ref_ratio, ngcrse
+         integer(c_int), intent(in) :: ref_ratio(3)
+         integer(c_int), value :: ngcrse
       end subroutine amrmfab_average_down_node_c
+
+      !> ParallelCopy with ADD semantics
+      subroutine amrmfab_parallel_add_c(dst,src,srccomp,dstcomp,ncomp,srcng,dstng,geom) &
+      &  bind(c,name='amrmfab_parallel_add')
+         import :: c_ptr,c_int
+         type(c_ptr), value :: dst,src,geom
+         integer(c_int), value :: srccomp,dstcomp,ncomp,srcng,dstng
+      end subroutine amrmfab_parallel_add_c
+
+      !> Restrict-SUM all fine deposits into the coarse level (lvl+1 → lvl)
+      subroutine amrmfab_sum_downto_c(fine_mf, crse_mf, crse_geom, fine_geom, ref_ratio) &
+         bind(c, name='amrmfab_sum_downto')
+         import :: c_ptr, c_int
+         type(c_ptr), value :: fine_mf, crse_mf, crse_geom, fine_geom
+         integer(c_int), intent(in) :: ref_ratio(3)
+      end subroutine amrmfab_sum_downto_c
+
+      !> PCInterp coarse→fine for deposit processing (no-op BCs, 0-indexed scomp)
+      subroutine amrmfab_interp_from_coarse_c(fine_mf, crse_mf, crse_geom, fine_geom, scomp, ncomp, ref_ratio) &
+         bind(c, name='amrmfab_interp_from_coarse')
+         import :: c_ptr, c_int
+         type(c_ptr), value :: fine_mf, crse_mf, crse_geom, fine_geom
+         integer(c_int), value :: scomp, ncomp
+         integer(c_int), intent(in) :: ref_ratio(3)
+      end subroutine amrmfab_interp_from_coarse_c
 
       !> Compute divergence of face-centered velocity into cell-centered MultiFab
       subroutine amrmfab_compute_divergence_c(divu, umac_x, umac_y, umac_z, geom) &
@@ -470,7 +646,7 @@ contains
       use amrex_amr_module, only: amrex_multifab, amrex_geometry
       type(amrex_multifab), intent(in) :: fmf
       type(amrex_multifab), intent(inout) :: cmf
-      integer, intent(in) :: rr
+      integer, intent(in) :: rr(3)
       type(amrex_geometry), intent(in), optional :: cgeom
       integer, intent(in), optional :: ngcrse
       integer :: ng
@@ -488,7 +664,7 @@ contains
       use amrex_amr_module, only: amrex_multifab, amrex_geometry
       type(amrex_multifab), intent(in) :: fmf
       type(amrex_multifab), intent(inout) :: cmf
-      integer, intent(in) :: rr
+      integer, intent(in) :: rr(3)
       type(amrex_geometry), intent(in), optional :: cgeom
       integer, intent(in), optional :: ngcrse
       integer :: ng
@@ -506,7 +682,7 @@ contains
       use amrex_amr_module, only: amrex_multifab, amrex_geometry
       type(amrex_multifab), intent(in) :: fmf
       type(amrex_multifab), intent(inout) :: cmf
-      integer, intent(in) :: rr
+      integer, intent(in) :: rr(3)
       type(amrex_geometry), intent(in), optional :: cgeom
       integer, intent(in), optional :: ngcrse
       integer :: ng
@@ -524,7 +700,7 @@ contains
       use amrex_amr_module, only: amrex_multifab, amrex_geometry
       type(amrex_multifab), intent(in) :: fmf
       type(amrex_multifab), intent(inout) :: cmf
-      integer, intent(in) :: rr
+      integer, intent(in) :: rr(3)
       type(amrex_geometry), intent(in), optional :: cgeom
       integer, intent(in), optional :: ngcrse
       integer :: ng
@@ -535,6 +711,42 @@ contains
          call amrmfab_average_down_node_c(fmf%p, cmf%p, c_null_ptr, rr, ng)
       end if
    end subroutine amrmfab_average_down_node
+
+   !> ParallelCopy with ADD semantics — accumulates src into dst instead of overwriting
+   subroutine amrmfab_parallel_add(dst,src,srccomp,dstcomp,ncomp,srcng,dstng,geom)
+      use amrex_amr_module, only: amrex_multifab,amrex_geometry
+      type(amrex_multifab), intent(inout) :: dst
+      type(amrex_multifab), intent(in) :: src
+      type(amrex_geometry), intent(in) :: geom
+      integer, intent(in) :: srccomp,dstcomp,ncomp,srcng,dstng
+      call amrmfab_parallel_add_c(dst%p,src%p,srccomp-1,dstcomp-1,ncomp,srcng,dstng,geom%p)
+   end subroutine amrmfab_parallel_add
+
+   !> Restrict-SUM fine deposits (valid+ghost) into the coarse level.
+   !> Delegates to AMReX's sum_fine_to_coarse; requires nGrow % ratio == 0.
+   !> Call after SumBoundary; average_down afterward fixes double-counted cells.
+   subroutine amrmfab_sum_downto(fmf,cmf,rr,cgeom,fgeom)
+      use amrex_amr_module, only: amrex_multifab, amrex_geometry
+      type(amrex_multifab), intent(in)    :: fmf
+      type(amrex_multifab), intent(inout) :: cmf
+      integer,              intent(in)    :: rr(3)
+      type(amrex_geometry), intent(in)    :: cgeom
+      type(amrex_geometry), intent(in)    :: fgeom
+      call amrmfab_sum_downto_c(fmf%p, cmf%p, cgeom%p, fgeom%p, rr)
+   end subroutine amrmfab_sum_downto
+
+   !> PCInterp coarse→fine interpolation for deposit processing.
+   !> Propagates coarse-level deposits into fine-covered cells (no-op BCs).
+   subroutine amrmfab_interp_from_coarse(fmf,cmf,rr,cgeom,fgeom,scomp,ncomp)
+      use amrex_amr_module, only: amrex_multifab, amrex_geometry
+      type(amrex_multifab), intent(inout) :: fmf
+      type(amrex_multifab), intent(in)    :: cmf
+      integer,              intent(in)    :: rr(3)
+      type(amrex_geometry), intent(in)    :: cgeom
+      type(amrex_geometry), intent(in)    :: fgeom
+      integer,              intent(in)    :: scomp,ncomp
+      call amrmfab_interp_from_coarse_c(fmf%p, cmf%p, cgeom%p, fgeom%p, scomp-1, ncomp, rr)
+   end subroutine amrmfab_interp_from_coarse
 
    !> Compute divergence of face-centered velocity into cell-centered MultiFab
    subroutine amrmfab_compute_divergence(divu, umac_x, umac_y, umac_z, geom)
@@ -583,7 +795,8 @@ contains
       type(c_ptr), intent(in) :: ctx_u, ctx_v, ctx_w
       type(c_funptr), intent(in) :: bc_u, bc_v, bc_w
       real(8), intent(in) :: time
-      integer, intent(in) :: scomp, dcomp, ncomp, ref_ratio, interp_type
+      integer, intent(in) :: scomp, dcomp, ncomp, interp_type
+      integer, intent(in) :: ref_ratio(3)
       integer, intent(in) :: lo_bc(*), hi_bc(*)
       call amrmfab_fillcoarsepatch_faces_c(mf_u%p, mf_v%p, mf_w%p, time, &
       &   cmf_u%p, cmf_v%p, cmf_w%p, geom_c%p, geom_f%p, &
@@ -610,7 +823,8 @@ contains
       type(c_ptr), intent(in) :: ctx_u, ctx_v, ctx_w
       type(c_funptr), intent(in) :: bc_u, bc_v, bc_w
       real(8), intent(in) :: time, t_old_c, t_new_c, t_old_f, t_new_f
-      integer, intent(in) :: scomp, dcomp, ncomp, ref_ratio, interp_type
+      integer, intent(in) :: scomp, dcomp, ncomp, interp_type
+      integer, intent(in) :: ref_ratio(3)
       integer, intent(in) :: lo_bc(*), hi_bc(*)
       call amrmfab_fillpatch_two_faces_c(mf_u%p, mf_v%p, mf_w%p, time, &
       &   t_old_c, mf_old_c_u%p, mf_old_c_v%p, mf_old_c_w%p, &
@@ -649,7 +863,8 @@ contains
       type(c_ptr), intent(in) :: solver_ctx
       type(c_funptr), intent(in) :: bc_dispatch
       real(8), intent(in) :: t_old_c, t_new_c, t_old_f, t_new_f, time
-      integer, intent(in) :: scomp, dcomp, ncomp, ref_ratio, interp_type, nbc
+      integer, intent(in) :: scomp, dcomp, ncomp, interp_type, nbc
+      integer, intent(in) :: ref_ratio(3)
       integer, intent(in) :: lo_bc(*), hi_bc(*)
       call amrmfab_fillpatch_two_c(mf%p, t_old_c, mf_old_c%p, t_new_c, mf_new_c%p, &
       &   geom_c%p, t_old_f, mf_old_f%p, t_new_f, mf_new_f%p, geom_f%p, &
@@ -668,12 +883,88 @@ contains
       type(c_ptr), intent(in) :: solver_ctx
       type(c_funptr), intent(in) :: bc_dispatch
       real(8), intent(in) :: time
-      integer, intent(in) :: scomp, dcomp, ncomp, ref_ratio, interp_type, nbc
+      integer, intent(in) :: scomp, dcomp, ncomp, interp_type, nbc
+      integer, intent(in) :: ref_ratio(3)
       integer, intent(in) :: lo_bc(*), hi_bc(*)
       call amrmfab_fillcoarsepatch_c(mf_f%p, time, mf_c%p, geom_c%p, geom_f%p, &
       &   solver_ctx, bc_dispatch, scomp, dcomp, ncomp, ref_ratio, interp_type, &
       &   lo_bc, hi_bc, nbc)
    end subroutine amrmfab_fillcoarsepatch
+
+   !> Build MLPoisson operator
+   subroutine amrpoisson_build(linop, nlevels, geom, ba, dm, semicoarsen, hidden_direction)
+      use iso_c_binding, only: c_ptr
+      use amrex_amr_module, only: amrex_geometry, amrex_boxarray, amrex_distromap
+      use amrex_linear_solver_module, only: amrex_poisson
+      type(amrex_poisson), intent(inout) :: linop
+      integer, intent(in) :: nlevels
+      type(amrex_geometry), intent(in) :: geom(0:)
+      type(amrex_boxarray), intent(in) :: ba(0:)
+      type(amrex_distromap), intent(in) :: dm(0:)
+      logical, intent(in), optional :: semicoarsen
+      integer, intent(in), optional :: hidden_direction
+      type(c_ptr) :: gp(0:nlevels-1), bp(0:nlevels-1), dp(0:nlevels-1)
+      integer :: lev, sc, hd
+      sc = 0; if (present(semicoarsen)) sc = merge(1,0,semicoarsen)
+      hd = -1; if (present(hidden_direction)) hd = hidden_direction
+      do lev = 0, nlevels-1
+         gp(lev) = geom(lev)%p
+         bp(lev) = ba(lev)%p
+         dp(lev) = dm(lev)%p
+      end do
+      linop%owner = .true.
+      call amrpoisson_build_c(linop%p, nlevels, gp, bp, dp, sc, hd)
+   end subroutine amrpoisson_build
+
+   !> Build MLABecLaplacian operator
+   subroutine amrabeclap_build(linop, nlevels, geom, ba, dm, semicoarsen, hidden_direction)
+      use iso_c_binding, only: c_ptr
+      use amrex_amr_module, only: amrex_geometry, amrex_boxarray, amrex_distromap
+      use amrex_linear_solver_module, only: amrex_abeclaplacian
+      type(amrex_abeclaplacian), intent(inout) :: linop
+      integer, intent(in) :: nlevels
+      type(amrex_geometry), intent(in) :: geom(0:)
+      type(amrex_boxarray), intent(in) :: ba(0:)
+      type(amrex_distromap), intent(in) :: dm(0:)
+      logical, intent(in), optional :: semicoarsen
+      integer, intent(in), optional :: hidden_direction
+      type(c_ptr) :: gp(0:nlevels-1), bp(0:nlevels-1), dp(0:nlevels-1)
+      integer :: lev, sc, hd
+      sc = 0; if (present(semicoarsen)) sc = merge(1,0,semicoarsen)
+      hd = -1; if (present(hidden_direction)) hd = hidden_direction
+      do lev = 0, nlevels-1
+         gp(lev) = geom(lev)%p
+         bp(lev) = ba(lev)%p
+         dp(lev) = dm(lev)%p
+      end do
+      linop%owner = .true.
+      call amrabeclap_build_c(linop%p, nlevels, gp, bp, dp, sc, hd)
+   end subroutine amrabeclap_build
+
+   !====================================================================
+   ! Cost-weighted DistributionMapping Factories
+   !====================================================================
+
+   !> Build a KnapSack-optimized DM from per-box costs
+   subroutine amrdm_make_knapsack(dm,costs,nboxes)
+      use amrex_amr_module, only: amrex_distromap
+      type(amrex_distromap), intent(out) :: dm
+      integer, intent(in) :: nboxes
+      real(WP), intent(in) :: costs(nboxes)
+      call amrdm_make_knapsack_c(dm%p,costs,nboxes)
+      dm%owner=.true.
+   end subroutine amrdm_make_knapsack
+
+   !> Build an SFC-optimized DM from per-box costs + BoxArray
+   subroutine amrdm_make_sfc(dm,costs,nboxes,ba)
+      use amrex_amr_module, only: amrex_distromap,amrex_boxarray
+      type(amrex_distromap), intent(out) :: dm
+      integer, intent(in) :: nboxes
+      real(WP), intent(in) :: costs(nboxes)
+      type(amrex_boxarray), intent(in) :: ba
+      call amrdm_make_sfc_c(dm%p,costs,nboxes,ba%p)
+      dm%owner=.true.
+   end subroutine amrdm_make_sfc
 
 end module amrex_interface
 

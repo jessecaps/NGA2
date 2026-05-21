@@ -1,38 +1,40 @@
 # AMR grid
-Base nx:    32
-Base ny:    32
-Base nz:    32
-Max levels: 2
+Base nx:   32
+Base ny:   32
+Base nz:   1
+Max level: 6
 
 # Regridding parameters
 Regrid nsteps: 10
-Tagging Rec:   50
-Tagging Res:   10
+Tagging Re:    100
+Tagging Rho:   0.1
 
 # Gammas
-GammaG: 1.4
+GammaG: 1.3
 GammaL: 6.12
 
 # Shock parameters
-Mach number:     1.2
-Shock location: -0.6
+Gas Mach number:    1.95
+Shock location:    -0.6
 
 # Liquid state
-Density ratio:     816.0
-Sound speed ratio: 4.3
+Density ratio:      133.5
+Liquid Mach number: 1.0
 
 # Viscous parameters
-Reynolds number:        5000.0
+Reynolds number:        3e5
 Prandtl number:         0.71
-Viscosity ratio:        58.3
-Diffusivity ratio:      20
+Viscosity ratio:        12.6
+Diffusivity ratio:      5.0
 Sutherland exponent:    1.5
 Sutherland temperature: 0.4042
 
 # Time integration
-Max dt:   5e-3
+Max dt:   1e-3
 Max CFL:  1.0
-Max time: 50
+Max time: 1e2
 
 # Output
-Output period: 0.1
+Output period:     1e-1
+Checkpoint period: 1
+Restart from:      !restart/drop_1.00000E+01

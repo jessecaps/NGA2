@@ -19,7 +19,6 @@ module mod_test_project
 
    ! Solver data
    type(amrincomp), allocatable, target :: fs
-   type(amrdata), allocatable :: dPdx, dPdy, dPdz  ! Workspace for pressure gradients
 
    ! Visualization
    type(amrviz), allocatable :: viz
@@ -73,14 +72,14 @@ contains
 
    !> Geometric tagger: refine right half of domain (x > 0.5)
    !> This creates a C/F interface at the x=0/x=1 periodic boundary
-   subroutine geometric_tagger(solver, lvl, tags_ptr, time)
+   subroutine geometric_tagger(solver, lvl, time, tags_ptr)
       use iso_c_binding,    only: c_ptr, c_char
       use amrex_amr_module, only: amrex_tagboxarray
       use amrgrid_class,    only: SETtag
       class(amrincomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
@@ -142,13 +141,6 @@ contains
          call log("Flow solver initialized")
       end block create_flow_solver
 
-      ! Create workspace for pressure gradients
-      create_workspace: block
-         allocate(dPdx); call dPdx%initialize(amr, name='dPdx', ncomp=1, ng=0, nodal=[.true., .false., .false.], interp=amrex_interp_none); call dPdx%register()
-         allocate(dPdy); call dPdy%initialize(amr, name='dPdy', ncomp=1, ng=0, nodal=[.false., .true., .false.], interp=amrex_interp_none); call dPdy%register()
-         allocate(dPdz); call dPdz%initialize(amr, name='dPdz', ncomp=1, ng=0, nodal=[.false., .false., .true.], interp=amrex_interp_none); call dPdz%register()
-      end block create_workspace
-
       ! Initialize grid (triggers callbacks)
       initialize: block
          call amr%init_from_scratch(time=0.0_WP)
@@ -187,24 +179,19 @@ contains
          call viz%write(time=0.0_WP)
 
          ! 2. Solve pressure Poisson equation
-         call fs%psolver%solve(rhs=fs%div, phi=fs%P)
+         call fs%psolver%solve(rhs=fs%div)
          call log("Pressure solver residual = "//trim(rtoa(fs%psolver%res)))
 
-         ! 3. Get C/F-consistent gradients
-         call fs%psolver%get_fluxes(phi=fs%P, flux_x=dPdx, flux_y=dPdy, flux_z=dPdz)
+         ! 3. Correct velocity
+         call fs%correct_velocity(scale=1.0_WP)
 
-         ! 4. Correct velocity: U = U + flux
-         call fs%U%saxpy(a=1.0_WP, src=dPdx)
-         call fs%V%saxpy(a=1.0_WP, src=dPdy)
-         call fs%W%saxpy(a=1.0_WP, src=dPdz)
-
-         ! 5. Average down for C/F consistency
+         ! 4. Average down for C/F consistency
          call fs%average_down_velocity()
 
-         ! 6. Fill ghosts
+         ! 5. Fill ghosts
          call fs%fill_velocity(time=0.0_WP)
 
-         ! 7. Check divergence
+         ! 6. Check divergence
          call fs%get_div()
          call log("After projection: divmax = "//trim(rtoa(fs%divmax)))
 
@@ -225,7 +212,7 @@ contains
          call viz%finalize()
          call fs%finalize()
          call amr%finalize()
-         deallocate(viz, fs, amr, dPdx, dPdy, dPdz)
+         deallocate(viz, fs, amr)
       end block cleanup
 
       call log("Test complete")

@@ -2,10 +2,10 @@
 Test: advect
 
 # Mesh parameters
-Base nx: 32
-Base ny: 32
-Base nz: 32
-Max level: 2
+Base nx: 16
+Base ny: 16
+Base nz: 16
+Max level: 3
 
 # Regridding parameters
 Regrid nsteps: 10
@@ -16,6 +16,6 @@ Max dt:   2.5e-3
 Max CFL:  0.9
 
 # Output
-Output period: 0.1
+Output period: 1e-2
 
 

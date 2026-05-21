@@ -1,13 +1,13 @@
 !> Flux register class wrapping AMReX FluxRegister
 !> Designed to be managed by amrgrid Registry
 module amrflux_class
-   use iso_c_binding,    only: c_ptr,c_associated
+   use iso_c_binding,    only: c_ptr,c_null_ptr,c_associated
    use precision,        only: WP
    use string,           only: str_medium
-   use amrex_amr_module, only: amrex_fluxregister,amrex_fluxregister_build,&
-   &                           amrex_fluxregister_destroy,amrex_multifab,&
+   use amrex_amr_module, only: amrex_fluxregister,amrex_multifab,&
    &                           amrex_boxarray,amrex_distromap,amrex_spacedim,&
    &                           amrex_real,amrex_geometry
+   use amrex_interface,  only: amrfluxreg_build,amrfluxreg_destroy
    implicit none
    private
 
@@ -54,7 +54,7 @@ contains
       integer :: i
       if (allocated(this%fr)) then
          do i=1,ubound(this%fr,1)
-            if (c_associated(this%fr(i)%p)) call amrex_fluxregister_destroy(this%fr(i))
+            if (c_associated(this%fr(i)%p)) call amrfluxreg_destroy(this%fr(i)%p)
          end do
          deallocate(this%fr)
       end if
@@ -66,18 +66,21 @@ contains
       integer, intent(in) :: lvl
       type(amrex_boxarray), intent(in) :: ba
       type(amrex_distromap), intent(in) :: dm
-      integer, intent(in) :: ref_ratio
+      integer, intent(in) :: ref_ratio(3)
       ! Destroy if already built
-      call amrex_fluxregister_destroy(this%fr(lvl))
-      ! Build new register
-      call amrex_fluxregister_build(this%fr(lvl),ba,dm,ref_ratio,lvl,this%ncomp)
+      if (c_associated(this%fr(lvl)%p)) call amrfluxreg_destroy(this%fr(lvl)%p)
+      ! Build new register with per-direction ref_ratio
+      this%fr(lvl)%owner = .false.  ! We manage lifecycle via our C wrapper
+      this%fr(lvl)%flev  = lvl
+      call amrfluxreg_build(this%fr(lvl)%p, ba%p, dm%p, ref_ratio, lvl, this%ncomp)
    end subroutine reset_level
 
    !> Clear flux register at a specific level
    subroutine clear_level(this,lvl)
       class(amrflux), intent(inout) :: this
       integer, intent(in) :: lvl
-      call amrex_fluxregister_destroy(this%fr(lvl))
+      if (c_associated(this%fr(lvl)%p)) call amrfluxreg_destroy(this%fr(lvl)%p)
+      this%fr(lvl)%p = c_null_ptr
    end subroutine clear_level
 
    !> Initialize coarse-side fluxes (resets the register)

@@ -7,6 +7,7 @@ module mathtools
    public :: Pi,twoPi
    public :: fv_itp_build,fd_itp_build
    public :: inverse_matrix
+   public :: symsolve
    public :: cross_product
    public :: normalize
    public :: qrotate
@@ -170,6 +171,58 @@ contains
         end do
      end do
    end function inverse_matrix
+
+
+   !> Solves the linear system A*x=b using Gauss-Jordan elimination with partial pivoting
+   !> A must be square; cost is O(n^3) — comparable to LAPACK for small n
+   function symsolve(A,b,info) result(x)
+      use messager, only: die
+      implicit none
+      real(WP), dimension(:,:), intent(in) :: A
+      real(WP), dimension(:),   intent(in) :: b
+      integer, intent(out), optional :: info
+      real(WP), dimension(size(b))         :: x
+      real(WP), dimension(size(A,1),size(A,2)) :: A_
+      real(WP), dimension(size(b))         :: x_
+      real(WP), dimension(size(A,2))       :: row_temp
+      real(WP) :: x_temp
+      integer :: i,j,n,pivot
+      real(WP) :: maxA,factor
+      n=size(b)
+      if (size(A,1).ne.n.or.size(A,2).ne.n) call die('[symsolve] Incompatible dimensions')
+      A_=A; x_=b
+      do i=1,n
+         ! Find pivot
+         pivot=i; maxA=abs(A_(i,i))
+         do j=i+1,n
+            if (abs(A_(j,i)).gt.maxA) then; maxA=abs(A_(j,i)); pivot=j; end if
+         end do
+         ! Swap rows
+         if (pivot.ne.i) then
+            row_temp=A_(i,:); A_(i,:)=A_(pivot,:); A_(pivot,:)=row_temp
+            x_temp=x_(i);     x_(i)=x_(pivot);     x_(pivot)=x_temp
+         end if
+         ! Singularity check
+         if (abs(A_(i,i)).lt.1.0e-12_WP) then
+            if (present(info)) then; info=-1; x=0.0_WP; return; end if
+            call die('[symsolve] Matrix is numerically singular')
+         end if
+         ! Normalize pivot row
+         factor=A_(i,i)
+         A_(i,:)=A_(i,:)/factor; x_(i)=x_(i)/factor
+         ! Eliminate column i from all other rows
+         do j=1,n
+            if (j.ne.i) then
+               factor=A_(j,i)
+               A_(j,:)=A_(j,:)-factor*A_(i,:)
+               x_(j)=x_(j)-factor*x_(i)
+            end if
+         end do
+      end do
+      ! Successful exit
+      if (present(info)) info=0
+      x=x_
+   end function symsolve
    
    
    ! Returns normalized vector: w=v/|v|

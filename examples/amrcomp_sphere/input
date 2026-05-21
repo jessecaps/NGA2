@@ -1,8 +1,8 @@
 # AMR grid
-Base nx:    32
-Base ny:    32
-Base nz:    32
-Max levels: 5
+Base nx:   32
+Base ny:   32
+Base nz:   32
+Max level: 5
 
 # Regridding parameters
 Regrid nsteps:     10

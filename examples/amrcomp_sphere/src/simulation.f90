@@ -175,17 +175,18 @@ contains
    end subroutine shock_init
 
    !> Apply inflow BC at low-x (face=1)
-   subroutine shock_dirichlet(solver,pQ,bc_bx,face,time)
+   subroutine shock_dirichlet(solver,lvl,time,face,bx,pQ)
       use amrex_amr_module, only: amrex_box
       class(amrcomp), intent(inout) :: solver
-      real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
-      type(amrex_box), intent(in) :: bc_bx
-      integer, intent(in) :: face
+      integer, intent(in) :: lvl
       real(WP), intent(in) :: time
+      integer, intent(in) :: face
+      type(amrex_box), intent(in) :: bx
+      real(WP), dimension(:,:,:,:), contiguous, pointer :: pQ
       integer :: i,j,k
       select case (face)
        case (1)  ! X-LOW: Dirichlet inflow with pre-shock (stationary) values
-         do k=bc_bx%lo(3),bc_bx%hi(3); do j=bc_bx%lo(2),bc_bx%hi(2); do i=bc_bx%lo(1),bc_bx%hi(1)
+         do k=bx%lo(3),bx%hi(3); do j=bx%lo(2),bx%hi(2); do i=bx%lo(1),bx%hi(1)
             pQ(i,j,k,1)=rho2
             pQ(i,j,k,2)=rho2*u2
             pQ(i,j,k,3)=0.0_WP
@@ -226,14 +227,14 @@ contains
    end subroutine init_VF
 
    !> Tagger based on vorticity and divergence
-   subroutine my_tagger(solver,lvl,tags_ptr,time)
+   subroutine my_tagger(solver,lvl,time,tags_ptr)
       use iso_c_binding,    only: c_ptr,c_char
       use amrex_amr_module, only: amrex_mfiter,amrex_box,amrex_tagboxarray
       use amrgrid_class,    only: SETtag
       class(amrcomp), intent(inout) :: solver
       integer, intent(in) :: lvl
-      type(c_ptr), intent(in) :: tags_ptr
       real(WP), intent(in) :: time
+      type(c_ptr), intent(in) :: tags_ptr
       type(amrex_tagboxarray) :: tags
       type(amrex_mfiter) :: mfi
       type(amrex_box) :: bx
@@ -272,10 +273,10 @@ contains
             ! Get dilatation
             div_neg=min(dudx+dvdy+dwdz,0.0_WP)
             ! Tag based on cell Reynolds numbers
-            Rec=rho*vort_mag*min(dx,dy,dz)**2/mu
+            Rec=rho*vort_mag*solver%amr%min_meshsize(lvl)**2/mu
             if (Rec.gt.Rec_tag) tagarr(i,j,k,1)=SETtag
             ! Also tag based on cell shock Reynolds number
-            Res=rho*abs(div_neg)*min(dx,dy,dz)**2/mu
+            Res=rho*abs(div_neg)*solver%amr%min_meshsize(lvl)**2/mu
             if (Res.gt.Res_tag) tagarr(i,j,k,1)=SETtag
             ! Tag near sphere surface
             dist=sphere_levelset([solver%amr%xlo+(real(i,WP)+0.5_WP)*dx,solver%amr%ylo+(real(j,WP)+0.5_WP)*dy,solver%amr%zlo+(real(k,WP)+0.5_WP)*dz],time)
@@ -384,7 +385,7 @@ contains
          amr%ylo=-10.0_WP; amr%yhi=+10.0_WP
          amr%zlo=-10.0_WP; amr%zhi=+10.0_WP
          amr%xper=.false.; amr%yper=.true.; amr%zper=.true.
-         call param_read('Max levels',amr%maxlvl)
+         call param_read('Max level',amr%maxlvl)
          call amr%initialize()
       end block create_amrgrid
       
@@ -448,8 +449,7 @@ contains
          ! Compute viscosities
          call get_viscosities()
          ! Add artificial bulk viscosity
-         call fs%get_viscartif(dt=time%dt,beta=fs%beta)
-         call fs%beta%multiply(src=fs%Q,srccomp=1)
+         call fs%add_viscartif(dt=time%dt)
          ! Compute Umag and Mach number
          call Umag%get_magnitude(fs%U,fs%V,fs%W)
          call Mach%copy(src=Umag); call Mach%divide(src=fs%C)
@@ -602,8 +602,7 @@ contains
          call get_viscosities()
 
          ! Add artificial bulk viscosity
-         call fs%get_viscartif(dt=time%dt,beta=fs%beta)
-         call fs%beta%multiply(src=fs%Q,srccomp=1)
+         call fs%add_viscartif(dt=time%dt)
 
          ! Compute Umag and Mach number
          call Umag%get_magnitude(fs%U,fs%V,fs%W)

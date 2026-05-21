@@ -12,7 +12,7 @@ USE_HDF5  = TRUE
 PROFILE   = FALSE
 DEBUG     = FALSE
 COMP      = gnu
-EXEBASE   = amrvof_tester
+EXEBASE   = nga2
 
 # Directories that contain user-defined code
 Udirs   := src
@@ -28,7 +28,7 @@ VPATH_LOCATIONS   += $(Ulocs)
 include $(NGA_HOME)/tools/GNUMake/Make.defs
 
 # Include NGA base code
-Bdirs   := amrbase amrsolvers libraries core
+Bdirs   := amrbase amrmpsolvers libraries core
 Bpack   += $(foreach dir, $(Bdirs), $(NGA_HOME)/src/$(dir)/Make.package)
 include $(Bpack)
 
