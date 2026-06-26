@@ -4,9 +4,9 @@ Partition :	2 2 1
 # Mesh definition
 Lx :	10
 Ly :	6
-Lz :	3!0.025
-nx :	200!400
-ny :	120!240
+Lz :	3
+nx :	200
+ny :	120
 nz :	60
 
 # Time integration

@@ -152,17 +152,17 @@ module simulation
               do kk=-1,1; do jj=-1,1; do ii=-1,1
                  if (ii.eq.0.and.jj.eq.0.and.kk.eq.0) cycle
                  sum_VF  =sum_VF  +(1.0_WP-ls%VF(i+ii,j+jj,k+kk))
-                 sum_VFQ1=sum_VFQ1+cfg%VF(i+ii,j+jj,k+kk)*Q1old(i+ii,j+jj,k+kk)
-                 sum_VFQ2=sum_VFQ2+cfg%VF(i+ii,j+jj,k+kk)*Q2old(i+ii,j+jj,k+kk)
+                 sum_VFQ1=sum_VFQ1+(1.0_WP-ls%VF(i+ii,j+jj,k+kk))*Q1old(i+ii,j+jj,k+kk)
+                 sum_VFQ2=sum_VFQ2+(1.0_WP-ls%VF(i+ii,j+jj,k+kk))*Q2old(i+ii,j+jj,k+kk)
               end do; end do; end do
               if (sum_VF.gt.0.0_WP) then
                  fs%Q(i,j,k,1)=(1.0_WP-ls%VF(i,j,k))*fs%Q(i,j,k,1)+ls%VF(i,j,k)*sum_VFQ1/sum_VF
                  fs%Q(i,j,k,2)=(1.0_WP-ls%VF(i,j,k))*fs%Q(i,j,k,2)+ls%VF(i,j,k)*sum_VFQ2/sum_VF
               end if
               ! No-slip now that density is determined
-              fs%Q(i,j,k,3)=(1.0_WP-0.5_WP*(ls%VF(i-1,j,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,3)+0.5_WP*(fs%Q(i-1,j,k,1)+fs%Q(i,j,k,1))*ls%VFU(i,j,k)
-              fs%Q(i,j,k,4)=(1.0_WP-0.5_WP*(ls%VF(i,j-1,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,4)+0.5_WP*(fs%Q(i,j-1,k,1)+fs%Q(i,j,k,1))*ls%VFV(i,j,k)
-              fs%Q(i,j,k,5)=(1.0_WP-0.5_WP*(ls%VF(i,j,k-1)+ls%VF(i,j,k)))*fs%Q(i,j,k,5)+0.5_WP*(fs%Q(i,j,k-1,1)+fs%Q(i,j,k,1))*ls%VFW(i,j,k)
+              fs%Q(i,j,k,3)=(1.0_WP-0.5_WP*(ls%VF(i-1,j,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,3)+0.5_WP*(fs%Q(i-1,j,k,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFU(i-1,j,k)+ls%VFU(i,j,k))
+              fs%Q(i,j,k,4)=(1.0_WP-0.5_WP*(ls%VF(i,j-1,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,4)+0.5_WP*(fs%Q(i,j-1,k,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFV(i,j-1,k)+ls%VFV(i,j,k))
+              fs%Q(i,j,k,5)=(1.0_WP-0.5_WP*(ls%VF(i,j,k-1)+ls%VF(i,j,k)))*fs%Q(i,j,k,5)+0.5_WP*(fs%Q(i,j,k-1,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFW(i,j,k-1)+ls%VFW(i,j,k))
            end do
         end do
      end do
