@@ -1,0 +1,34 @@
+# Parallelization
+Partition :	2 2 1
+
+# Mesh definition
+Lx :	10
+Ly :	6
+Lz :	3
+nx :	200
+ny :	120
+nz :	60
+
+# Time integration
+Max timestep size : 1e-2
+Max cfl number :    0.9
+Max time :          100
+
+# Adimensional flow parameters
+Gamma : 1.4
+Prandtl number : 0.71
+Shock Mach number : 3
+Shock location :   -0.5
+Reynolds number : 5000
+
+# Solid properties
+Initial Solid Angle : 20
+Particle file : element_data.bin
+Particle timestep size : 1e-2
+Elastic Modulus : 20
+Poisson Ratio : 0.25
+Solid density : 10
+Critical Energy Release Rate : .01
+
+# Ensight output
+Ensight output period :  0.1
