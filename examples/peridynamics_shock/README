@@ -1,1 +1,3 @@
-Coupling peridynamics with the compressible solver to simulate shock-induced breakup.
+(6/30/26 8:09 PM:
+Switched it over to RK4, was RK2. 
+Have previously run with element.bin files, probably should change this over to be using a uniform grid. 

@@ -712,9 +712,9 @@ contains
       ! Advance velocity only based on new force
       do n=1,this%np_
          ! Advance with Verlet scheme
-         if (this%p(n)%id.le.-1) cycle
          stress=this%cfg%get_velocity(pos=this%p(n)%pos,i0=this%p(n)%ind(1),j0=this%p(n)%ind(2),k0=this%p(n)%ind(3),U=stress_x,V=stress_y,W=stress_z)
          this%p(n)%Afluid=stress/this%rho
+         if (this%p(n)%id.le.-1) cycle
          this%p(n)%vel=this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
       end do
       

@@ -28,8 +28,8 @@ module simulation
    public :: simulation_init,simulation_run,simulation_final
    
    !> Private work arrays
-   real(WP), dimension(:,:,:,:), allocatable :: dQdt
-   real(WP), dimension(:,:,:)  , allocatable :: Ui,Vi,Wi,Ma,beta,visc,visc_t,div
+   real(WP), dimension(:,:,:,:,:), allocatable :: dQdt
+   real(WP), dimension(:,:,:)    , allocatable :: Ui,Vi,Wi,Ma,beta,visc,visc_t,div
 
    !> Post-shock viscosity and temperature
    real(WP) :: visc0,T0
@@ -44,7 +44,6 @@ module simulation
    real(WP) :: Re
 
    !> Max timestep size for solid solver
-   integer :: ls_it
    real(WP) :: ls_dt,ls_dt_max
    
  contains
@@ -292,7 +291,7 @@ module simulation
 
       ! Allocate work arrays
       allocate_work_arrays: block
-        allocate(dQdt  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:fs%nQ))
+        allocate(dQdt  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:fs%nQ,1:4))
         allocate(Ui    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
         allocate(Vi    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
         allocate(Wi    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -302,142 +301,6 @@ module simulation
         allocate(visc_t(cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
         allocate(div   (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
       end block allocate_work_arrays
-
-
-      ! Initialize time tracker with 2 subiterations
-      initialize_timetracker: block
-        time=timetracker(amRoot=cfg%amRoot)
-        call param_read('Max timestep size',time%dtmax)
-        call param_read('Max cfl number',time%cflmax)
-        call param_read('Max time',time%tmax)
-        time%dt=time%dtmax
-        time%itmax=2
-      end block initialize_timetracker
-
-
-      ! Initialize Lagrangian solid solver
-      initialize_lss: block
-         use mathtools, only: Pi
-         real(WP) :: mu,kk,max_stretch,dx,theta
-         integer :: np
-         type triangle_type
-            real(WP), dimension(3) :: norm
-            real(WP), dimension(3) :: v1
-            real(WP), dimension(3) :: v2
-            real(WP), dimension(3) :: v3
-         end type triangle_type
-         type(triangle_type), dimension(:), allocatable :: t
-         
-         ! Create solver
-         ls=lss(cfg=cfg,name='solid')
-         
-         ! Set material properties
-         call param_read('Elastic Modulus',ls%elastic_modulus)
-         call param_read('Poisson Ratio',ls%poisson_ratio)
-         call param_read('Solid density',ls%rho)
-         call param_read('Critical Energy Release Rate',ls%crit_energy)
-         call param_read('Initial Solid Angle',theta,default=0.0_WP)
-
-         ! Maximum timestep size used for particles
-         call param_read('Particle timestep size',ls_dt_max,default=huge(1.0_WP))
-         ls_dt=min(ls_dt_max,time%dtmax)
-         ls_it=0
-         
-         ! Discretization
-         !ls%delta=fs%cfg%min_meshsize
-
-         ! Discretization
-         dx=fs%cfg%min_meshsize/3.0_WP
-         ls%delta=3.0_WP*dx
-
-         ! Output some info on stretch
-         mu=ls%elastic_modulus/(2.0_WP+2.0_WP*ls%poisson_ratio)
-         kk=ls%elastic_modulus/(3.0_WP-6.0_WP*ls%poisson_ratio)
-         if (fs%cfg%nx.eq.1.or.fs%cfg%ny.eq.1.or.fs%cfg%nz.eq.1) then
-            max_stretch=sqrt(ls%crit_energy/((6.0_WP*mu/Pi+16.0_WP/(9.0_WP*Pi**2)*(kk-2.0_WP*mu))*ls%delta))
-         else
-            max_stretch=sqrt(ls%crit_energy/((3.0_WP*mu+(kk-5.0_WP*mu/3.0_WP)*0.75_WP**4)*ls%delta))
-         end if
-         
-         ! First object =====================
-         object1: block
-           use mpi_f08,   only: MPI_BCAST
-           use parallel,  only: MPI_REAL_WP
-           integer :: i,j,k,nx,ny,nz,iunit,ierr
-           real(WP) :: Lx,Ly,Lz,xr,yr
-           real(WP), dimension(:), allocatable :: x,y,z
-           if (ls%cfg%amRoot) then
-              ! Object size
-              Lx=0.5_WP; Ly=0.5_WP; Lz=0.5_WP
-              Rcyl=Lx
-              ! Create simple rectilinear grid
-              nx=int(Lx/dx)
-              ny=int(Ly/dx)
-              nz=int(Lz/dx)
-              allocate(x(1:nx),y(1:ny),z(1:nz))
-              do i=1,nx
-                 x(i)=real(i-1,WP)*dx+0.5_WP*dx
-              end do
-              do j=1,ny
-                 y(j)=real(j-1,WP)*dx-0.5_WP*Ly+0.5_WP*dx
-              end do
-              do k=1,nz
-                 z(k)=real(k-1,WP)*dx-0.5_WP*Lz+0.5_WP*dx
-              end do
-              ! Set angle of cube
-              theta=theta*Pi/180.0_WP
-              ! Loop over mesh and create particles
-              np=0
-              do k=1,nz
-                 do j=1,ny
-                    do i=1,nx
-                       ! Increment particle
-                       np=np+1
-                       call ls%resize(np)
-                       ! Set position
-                       xr=x(i)*cos(theta)-y(j)*sin(theta)
-                       yr=x(i)*sin(theta)+y(j)*cos(theta)
-                       ls%p(np)%pos=[xr,yr,z(k)]
-                       ! Set object id and velocity
-                       ls%p(np)%id=1
-                       ls%p(np)%vel=0.0_WP
-                       ! Set object volume
-                       ls%p(np)%vol=dx**3
-                       ! Zero out force
-                       ls%p(np)%Abond=0.0_WP
-                       ls%p(np)%Afluid=0.0_WP
-                       ! Locate the particle on the mesh
-                       ls%p(np)%ind=ls%cfg%get_ijk_global(ls%p(np)%pos,[ls%cfg%imin,ls%cfg%jmin,ls%cfg%kmin])
-                       ! Assign a unique integer to particle
-                       ls%p(np)%i=np
-                       ! Activate the particle
-                       ls%p(np)%flag=0
-                    end do
-                 end do
-              end do
-              deallocate(x,y,z)
-           end if
-           ! Communicate radius
-           call MPI_BCAST(Rcyl,1,MPI_REAL_WP,0,cfg%comm,ierr)
-         end block object1
-
-         ! Communicate particles
-         call ls%sync()
-
-         ! Get initial volume fraction
-         call ls%update_VF()
-         
-         ! Initalize bonds
-         call ls%bond_init()
-
-         if (ls%cfg%amRoot) then
-            print*,"===== Solid Setup Description ====="
-            print*,'Number of particles', np
-            print*,'Maximum stretching',max_stretch
-            print*,'Min particle spacing',ls%min_dist
-         end if
-         
-      end block initialize_lss
 
 
       ! Initialize eos and flow parameters
@@ -470,6 +333,7 @@ module simulation
         ! Get reference temperature based on post-shock conditions
         T0=get_T(rho2,p2)
         ! Define viscosity based on post-shock Reynolds number
+        call param_read('Cylinder radius',Rcyl)
         call param_read('Reynolds number',Re); visc0=rho2*2.0_WP*Rcyl*u2/Re
         ! Output case info
         if (cfg%amRoot) then
@@ -490,6 +354,100 @@ module simulation
       end block initialize_parameters
 
 
+      ! Initialize time tracker with 2 subiterations
+      initialize_timetracker: block
+        time=timetracker(amRoot=cfg%amRoot)
+        call param_read('Max timestep size',time%dtmax)
+        call param_read('Max cfl number',time%cflmax)
+        call param_read('Max time',time%tmax)
+        time%dt=time%dtmax
+        time%itmax=2
+      end block initialize_timetracker
+
+
+      ! Initialize Lagrangian solid solver
+      initialize_lss: block
+         real(WP) :: dx,mu,kk,max_stretch,Lx,Ly,Lz
+         real(WP) :: xmin,xmax,ymin,ymax,zmin,zmax
+         integer :: np,nt
+         type triangle_type
+            real(WP), dimension(3) :: norm
+            real(WP), dimension(3) :: v1
+            real(WP), dimension(3) :: v2
+            real(WP), dimension(3) :: v3
+         end type triangle_type
+         type(triangle_type), dimension(:), allocatable :: t
+         
+         ! Create solver
+         ls=lss(cfg=cfg,name='solid')
+         
+         ! Set material properties
+         call param_read('Elastic Modulus',ls%elastic_modulus)
+         call param_read('Poisson Ratio',ls%poisson_ratio)
+         call param_read('Solid density',ls%rho)
+         call param_read('Critical Energy Release Rate',ls%crit_energy)
+
+         ! Maximum timestep size used for particles
+         call param_read('Particle timestep size',ls_dt_max,default=huge(1.0_WP))
+         ls_dt=min(ls_dt_max,time%dtmax)
+         
+         ! Discretization
+         ls%delta=fs%cfg%min_meshsize
+
+         ! Output some info on stretch
+         mu=ls%elastic_modulus/(2.0_WP+2.0_WP*ls%poisson_ratio)
+         kk=ls%elastic_modulus/(3.0_WP-6.0_WP*ls%poisson_ratio)
+         max_stretch=sqrt(ls%crit_energy/((3.0_WP*mu+(kk-5.0_WP*mu/3.0_WP)*0.75_WP**4)*ls%delta))
+         
+         ! Only root process initializes solid particles
+         if (ls%cfg%amRoot) then
+            ! Read the STL file and get domain extents and levelset
+            read_bin: block
+              use messager, only: die
+              integer :: p,iunit,ierr
+              character(len=80) :: partfile
+              call param_read('Particle file',partfile)
+              open(newunit=iunit,file=trim(partfile),access="stream",form="unformatted",action="read",status="old",iostat=ierr)
+              if(ierr.ne.0) call die('[read_stl] Could not open file: '//trim(partfile))
+              read(iunit) np
+              call ls%resize(np)
+              do p=1,np
+                 read(iunit) ls%p(p)%pos(1), ls%p(p)%pos(2), ls%p(p)%pos(3), ls%p(p)%vol
+                 ! Set object id and velocity
+                 ls%p(p)%id=-2
+                 ls%p(p)%vel=0.0_WP
+                 ! Zero out force
+                 ls%p(p)%Abond=0.0_WP
+                 ls%p(p)%Afluid=0.0_WP
+                 ! Locate the particle on the mesh
+                 ls%p(p)%ind=ls%cfg%get_ijk_global(ls%p(p)%pos,[ls%cfg%imin,ls%cfg%jmin,ls%cfg%kmin])
+                 ! Assign a unique integer to particle
+                 ls%p(p)%i=p
+                 ! Activate the particle
+                 ls%p(p)%flag=0
+              end do
+              close(iunit)
+            end block read_bin
+         end if
+      
+         ! Communicate particles
+         call ls%sync()
+
+         ! Get initial volume fraction
+         call ls%update_VF()
+         
+         ! Initalize bonds
+         call ls%bond_init()
+
+         if (ls%cfg%amRoot) then
+            print*,"===== Solid Setup Description ====="
+            print*,'Number of particles', np
+            print*,'Maximum stretching =',max_stretch
+         end if
+         
+      end block initialize_lss
+
+
      ! Create partmesh object for visualizing Lagrangian particles
       create_pmesh: block
          use lss_class, only: max_bond
@@ -497,7 +455,7 @@ module simulation
          pmesh=partmesh(nvar=3,nvec=2,name='solid')
          pmesh%varname(1)='failfrac'
          pmesh%varname(2)='dilatation'
-         pmesh%varname(3)='volume'
+         pmesh%varname(3)='flag'
          pmesh%vecname(1)='velocity'
          pmesh%vecname(2)='bond_force'
          call ls%update_partmesh(pmesh)
@@ -513,7 +471,7 @@ module simulation
                pmesh%var(1,i)=0.0_WP
             end if
             pmesh%var(2,i)  =ls%p(i)%dil
-            pmesh%var(3,i)  =ls%p(i)%vol
+            pmesh%var(3,i)  =ls%p(i)%flag
             pmesh%vec(:,1,i)=ls%p(i)%vel
             pmesh%vec(:,2,i)=ls%p(i)%Abond
          end do
@@ -549,8 +507,6 @@ module simulation
         Ma=sqrt(Ui**2+Vi**2+Wi**2)/fs%C
         ! Compute dilatation
         call get_div()
-        ! Compute viscosities
-        call prepare_viscosities()
       end block initialize_variables
 
 
@@ -564,7 +520,6 @@ module simulation
          ! Add variables to output
          call ens_out%add_particle('particles',pmesh)
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
-         call ens_out%add_vector('velocity_s',ls%VFU,ls%VFV,ls%VFW)
          call ens_out%add_scalar('P',fs%P)
          call ens_out%add_scalar('T',fs%T)
          call ens_out%add_scalar('Mach',Ma)
@@ -615,10 +570,6 @@ module simulation
         call cflfile%add_column(fs%CFLv_x,'Viscous xCFL')
         call cflfile%add_column(fs%CFLv_y,'Viscous yCFL')
         call cflfile%add_column(fs%CFLv_z,'Viscous zCFL')
-        call cflfile%add_column(ls%CFLp_x,'Particle xCFL')
-        call cflfile%add_column(ls%CFLp_y,'Particle yCFL')
-        call cflfile%add_column(ls%CFLp_z,'Particle zCFL')
-        call cflfile%add_column(ls%CFLp_a,'Particle aCFL')
         call cflfile%write()
         ! Create conservation monitor
         consfile=monitor(fs%cfg%amRoot,'conservation')
@@ -637,7 +588,6 @@ module simulation
         call sfile%add_column(time%n,'Timestep number')
         call sfile%add_column(time%t,'Time')
         call sfile%add_column(ls_dt,'Particle dt')
-        call sfile%add_column(ls_it,'Particle sub-iter')
         call sfile%add_column(time%cfl,'Maximum CFL')
         call sfile%add_column(ls%np,'Particle number')
         call sfile%add_column(ls%VFmax,'VFmax')
@@ -665,7 +615,8 @@ module simulation
       do while (.not.time%done())
 
          ! Increment time
-         call fs%get_cfl(time%dt,time%cfl)
+         call ls%get_cfl(time%dt,time%cfl)
+         call fs%get_cfl(time%dt,cfl); time%cfl=max(time%cfl,cfl)
          call time%adjust_dt()
          call time%increment()
 
@@ -673,23 +624,21 @@ module simulation
          solid: block
            real(WP) :: dt_done,mydt
            ! Compute divergence of fluid stress
-           call fs%get_div_stress(divx=dQdt(:,:,:,1),divy=dQdt(:,:,:,2),divz=dQdt(:,:,:,3))
+           call fs%get_div_stress(divx=dQdt(:,:,:,1,1),divy=dQdt(:,:,:,2,1),divz=dQdt(:,:,:,3,1))
            ! Sub-iteratore
            call ls%get_cfl(ls_dt,cfl=cfl)
            if (cfl.gt.0.0_WP) ls_dt=min(ls_dt*time%cflmax/cfl,ls_dt_max)
            dt_done=0.0_WP
-           ls_it=0
            do while (dt_done.lt.time%dtmid)
               ! Decide the timestep size
               mydt=min(ls_dt,time%dtmid-dt_done)
               ! Advance particles
-              call ls%advance(dt      =mydt,         &
-              &               stress_x=dQdt(:,:,:,1),&
-              &               stress_y=dQdt(:,:,:,2),&
-              &               stress_z=dQdt(:,:,:,3))
+              call ls%advance(dt      =mydt,           &
+              &               stress_x=dQdt(:,:,:,1,1),&
+              &               stress_y=dQdt(:,:,:,2,1),&
+              &               stress_z=dQdt(:,:,:,3,1))
               ! Increment
               dt_done=dt_done+mydt
-              ls_it=ls_it+1
            end do
          end block solid
 
@@ -699,17 +648,49 @@ module simulation
          ! Prepare SGS viscosity models
          call prepare_viscosities()
 
+         ! ! First RK step ====================================================================================
+         ! ! Get non-SL RHS and increment
+         ! call fs%rhs(dQdt(:,:,:,:,1))
+         ! fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,1)
+         ! ! Apply IBM
+         ! call apply_ibm()
+
+         ! ! Second RK step ===================================================================================
+         ! ! Get non-SL RHS and increment at midpoint
+         ! call fs%rhs(dQdt(:,:,:,:,2))
+         ! fs%Q=fs%Qold+time%dt*dQdt(:,:,:,:,2)
+         ! ! Apply IBM
+         ! call apply_ibm()
+
          ! First RK step ====================================================================================
-         ! Get RHS and increment
-         call fs%rhs(dQdt)
-         fs%Q=fs%Qold+0.5_WP*time%dt*dQdt
+         ! Get non-SL RHS and increment
+         call fs%rhs(dQdt(:,:,:,:,1))
+         ! Advance
+         fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,1)
          ! Apply IBM
          call apply_ibm()
 
          ! Second RK step ===================================================================================
-         ! Get RHS and increment at midpoint
-         call fs%rhs(dQdt)
-         fs%Q=fs%Qold+time%dt*dQdt
+         ! Get non-SL RHS and increment
+         call fs%rhs(dQdt(:,:,:,:,2))
+         ! Advance
+         fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,2)
+         ! Apply IBM
+         call apply_ibm()
+
+         ! Third RK step ====================================================================================
+         ! Get non-SL RHS and increment
+         call fs%rhs(dQdt=dQdt(:,:,:,:,3))
+         ! Advance
+         fs%Q=fs%Qold+1.0_WP*time%dt*dQdt(:,:,:,:,3)
+         ! Apply IBM
+         call apply_ibm()
+
+         ! Fourth RK step ===================================================================================
+         ! Get non-SL RHS and increment
+         call fs%rhs(dQdt(:,:,:,:,4))
+         ! Advance
+         fs%Q=fs%Qold+time%dt/6.0_WP*(dQdt(:,:,:,:,1)+2.0_WP*dQdt(:,:,:,:,2)+2.0_WP*dQdt(:,:,:,:,3)+dQdt(:,:,:,:,4))
          ! Apply IBM
          call apply_ibm()
 
@@ -750,7 +731,7 @@ module simulation
                     pmesh%var(1,i)=0.0_WP
                  end if
                  pmesh%var(2,i)  =ls%p(i)%dil
-                 pmesh%var(3,i)  =ls%p(i)%vol
+                 pmesh%var(3,i)  =ls%p(i)%flag
                  pmesh%vec(:,1,i)=ls%p(i)%vel
                  pmesh%vec(:,2,i)=ls%p(i)%Abond
               end do
