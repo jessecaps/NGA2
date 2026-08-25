@@ -499,9 +499,6 @@ contains
             
             ! Increment sub-iteration counter
             time%it=time%it+1
-
-            ! End simuilation if particle leaves the domain
-            if (pos(1).gt.fs%cfg%x(fs%cfg%imax+1)) time%event_done=.true.
             
          end do
          
@@ -517,6 +514,9 @@ contains
          call mfile%write()
          call pfile%write()
          call cflfile%write()
+
+         ! End simuilation if particle leaves the domain
+         if (pos(1).gt.fs%cfg%x(fs%cfg%imax+1)) time%event_done=.true.
          
       end do
       
