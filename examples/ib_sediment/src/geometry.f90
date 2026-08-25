@@ -9,7 +9,7 @@ module geometry
    type(ibconfig), public :: cfg
    
    !> Pipe diameter
-   real(WP), public :: D
+   real(WP), public :: D1,D2
    
    public :: geometry_init
    
@@ -29,25 +29,27 @@ contains
       create_grid: block
          use sgrid_class, only: cartesian
          integer :: i,j,k,nx,ny,nz,no
-         real(WP) :: Lx,Ly,Lz,dx
+         real(WP) :: Lx,Ly,Lz,dx,Dmax
          real(WP), dimension(:), allocatable :: x,y,z
          
          ! Read in grid definition
-         call param_read('Pipe length',Lx)
-         call param_read('Pipe diameter',D)
+         call param_read('L',Lx)
+         call param_read('D1',D1)
+         call param_read('D2',D2)
          call param_read('ny',ny); allocate(y(ny+1))
          call param_read('nx',nx); allocate(x(nx+1))
          call param_read('nz',nz); allocate(z(nz+1))
-         
+
+         Dmax=max(D1,D2)
          dx=Lx/real(nx,WP)
          no=4
          if (ny.gt.1) then
-            Ly=D+real(2*no,WP)*D/real(ny-2*no,WP)
+            Ly=Dmax+real(2*no,WP)*Dmax/real(ny-2*no,WP)
          else
             Ly=dx
          end if
          if (nz.gt.1) then
-            Lz=D+real(2*no,WP)*D/real(ny-2*no,WP)
+            Lz=Dmax+real(2*no,WP)*Dmax/real(ny-2*no,WP)
          else
             Lz=dx
          end if
@@ -83,29 +85,68 @@ contains
       end block create_cfg
       
       
-      ! Create masks for this config
+      ! Geometry: stepped cylinder, D1 < D2
+      !
+      !                 r
+      !                 ^
+      !                 |
+      !        D2/2  ---+                    +------------------+
+      !                 |                    |                  |
+      !                 |                    |                  |
+      !        D1/2  ---+--------------------+                  |
+      !                 |                                       |
+      !                 |                                       |
+      !       -D1/2  ---+--------------------+                  |
+      !                 |                    |                  |
+      !                 |                    |                  |
+      !       -D2/2  ---+                    +------------------+
+      !                 |
+      !                 +--------------------+------------------+---> x
+      !                 0                    H                  L
       create_walls: block
         use ibconfig_class, only: bigot,sharp
+        use messager,  only: die
         integer :: i,j,k
-        real(WP) :: dx,dyz,dist,x0,x1,R
-        R  = 0.5_WP*D
-        x0 = cfg%x(cfg%imin+2)
-        x1 = cfg%x(cfg%imax-1)
+        real(WP) :: H,r,x,R1,R2,Rlo,Rhi
+        real(WP) :: xcA,xcC,rcB,distA,distB,distC,dist,sgn
+        call param_read('H',H)
+        if (H.gt.cfg%xL) call die('H cannot be larger than Lx!')
+        R1=0.5_WP*D1; R2=0.5_WP*D2
+        Rlo=min(R1,R2); Rhi=max(R1,R2)
         do k=cfg%kmino_,cfg%kmaxo_
            do j=cfg%jmino_,cfg%jmaxo_
               do i=cfg%imino_,cfg%imaxo_
-!!$                 ! Radial Distance From Cylinder Axis
-!!$                 dyz=sqrt(cfg%ym(j)**2+cfg%zm(k)**2)-R
-!!$                 ! Distance Along X To End Caps
-!!$                 dx=max(x0-cfg%xm(i),cfg%xm(i)-x1)
-!!$                 ! Signed Distance Function
-!!$                 if(dyz<=0.0_WP .and. dx<=0.0_WP) then
-!!$                    dist=-min(-dyz,-dx)
-!!$                 else
-!!$                    dist=sqrt(max(dx,0.0_WP)**2+max(dyz,0.0_WP)**2)
-!!$                 end if
-!!$                 cfg%Gib(i,j,k)=dist
-                 cfg%Gib(i,j,k)=sqrt(cfg%ym(j)**2+cfg%zm(k)**2)-R
+                 x=cfg%xm(i)
+                 r=sqrt(cfg%ym(j)**2+cfg%zm(k)**2)
+                 ! Distance to side wall below H: ray {r=R1, x<=H}
+                 xcA=min(x,H)
+                 distA=sqrt((x-xcA)**2+(r-R1)**2)
+                 ! Distance to side wall above H: ray {r=R2, x>=H}
+                 xcC=max(x,H)
+                 distC=sqrt((x-xcC)**2+(r-R2)**2)
+                 ! Distance to flat shoulder at x=H, connecting R1 to R2
+                 rcB=min(max(r,Rlo),Rhi)
+                 distB=sqrt((x-H)**2+(r-rcB)**2)
+
+                 dist=min(distA,distB,distC)
+
+                 ! Inside/outside test
+                 if (x.lt.H) then
+                    if (r.lt.R1) then
+                       sgn=-1.0_WP
+                    else
+                       sgn=+1.0_WP
+                    end if
+                 else
+                    if (r.lt.R2) then
+                       sgn=-1.0_WP
+                    else
+                       sgn=+1.0_WP
+                    end if
+                 end if
+
+                 cfg%Gib(i,j,k)=sgn*dist
+
               end do
            end do
         end do
@@ -113,8 +154,6 @@ contains
         call cfg%calculate_normal()
         ! Get VF field
         call cfg%calculate_vf(method=sharp,allow_zero_vf=.false.)
-        if (cfg%iproc.eq.1) cfg%VF(cfg%imino:cfg%imin-1,:,:)=0.0_WP
-        if (cfg%iproc.eq.cfg%npx) cfg%VF(cfg%imax+1:cfg%imaxo,:,:)=0.0_WP
       end block create_walls
       
       

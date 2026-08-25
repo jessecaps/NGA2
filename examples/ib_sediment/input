@@ -2,11 +2,13 @@
 Partition : 1 2 2
 
 # Mesh definition
-Pipe diameter : 2.5e-3! 3.5e-3, 5.5e-3
-Pipe length :   25e-3
-nx : 640
-ny : 64
-nz : 64
+L  : 20e-3
+H  : 10e-3
+D1 : 2.5e-3
+D2 : 7.5e-3
+nx : 372
+ny : 140
+nz : 140
 
 # Time integration
 Max timestep size : 5e-4
@@ -17,14 +19,14 @@ Max time :          1000
 Use implicit solver : .true
 
 # Particle properties
-Particle diameter : .00055
+Particle diameter : 0.644e-3
 Particle density : 2500
-Particle position : 20e-3 0 0
+Particle position : 0.7e-3 0 0
 
 # Fluid properties
 Dynamic viscosity : 0.00307
 Density :           1131
-Gravity :           -9.81 0 0
+Gravity :           9.81 0 0
 
 # Ensight output
 Ensight output period : 50e-4

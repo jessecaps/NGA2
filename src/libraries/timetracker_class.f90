@@ -29,6 +29,7 @@ module timetracker_class
       real(WP) :: told,dtold,tmid,dtmid                !< Old/mid time and timestep size
       real(WP) :: relax                                !< Relaxation coefficient (nominally between 0 and 1, default is 1) to improve convergence of subiterations
       logical  :: print_info=.true.                    !< Should I print time information?
+      logical ::  event_done=.false.                   !< Should I terminate the simulation early?
    contains
       procedure :: increment                           !< Default method for incrementing time
       procedure :: adjust_dt                           !< Default method for adjusting timestep size
@@ -130,6 +131,10 @@ contains
          done=.true.
          write(message,'(" Timetracker [",a,"] reached maximum wallclock time allowed ")') trim(this%name); call log(message)
       end if
+      if (this%event_done) then
+          done=.true.
+          write(message,'(" Timetracker [",a,"] terminated by simulation event ")') trim(this%name); call log(message)
+       end if
    end function done
    
    

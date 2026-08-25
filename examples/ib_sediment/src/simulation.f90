@@ -1,7 +1,7 @@
 !> Various definitions and tools for running an NGA2 simulation
 module simulation
    use precision,         only: WP
-   use geometry,          only: cfg,D
+   use geometry,          only: cfg
    use fft2d_class,       only: fft2d
    use ddadi_class,       only: ddadi
    use incomp_class,      only: incomp
@@ -499,6 +499,9 @@ contains
             
             ! Increment sub-iteration counter
             time%it=time%it+1
+
+            ! End simuilation if particle leaves the domain
+            if (pos(1).gt.fs%cfg%x(fs%cfg%imax+1)) time%event_done=.true.
             
          end do
          
