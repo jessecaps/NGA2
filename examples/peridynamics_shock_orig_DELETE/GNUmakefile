@@ -1,13 +1,12 @@
 # NGA location if not yet defined
-NGA_HOME ?= ~/nga2/Repositories/nga2
+NGA_HOME ?= ../..
 
 # Compilation parameters
 PRECISION = DOUBLE
 USE_MPI   = TRUE
-USE_HYPRE = TRUE
-USE_LAPACK= TRUE
-USE_FFTW  = TRUE
-USE_IRL   = FALSE
+USE_FFTW  = FALSE
+USE_HYPRE = FALSE
+USE_LAPACK= FALSE
 PROFILE   = FALSE
 DEBUG     = FALSE
 COMP      = gnu
@@ -24,14 +23,13 @@ INCLUDE_LOCATIONS += $(Ulocs)
 VPATH_LOCATIONS   += $(Ulocs)
 
 # External libraries are defined in .profile/.bashrc/.zshrc, but could be defined here as well
-HYPRE_DIR=/Users/imauser/nga2/Repositories/hypre/src/hypre
-FFTW_DIR=/opt/homebrew/Cellar/fftw/3.3.10_2
 
 # NGA compilation definitions
 include $(NGA_HOME)/tools/GNUMake/Make.defs
 
 # Include NGA base code
-Bdirs   := constant_density particles core data transform solver config grid libraries
+Bdirs   := core data solver config grid libraries
+#Bdirs   := core data config grid libraries
 Bpack   += $(foreach dir, $(Bdirs), $(NGA_HOME)/src/$(dir)/Make.package)
 include $(Bpack)
 

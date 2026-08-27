@@ -4,7 +4,6 @@ module lss_class
    use precision,      only: WP
    use string,         only: str_medium
    use config_class,   only: config
-   use ddadi_class,    only: ddadi
    use mpi_f08,        only: MPI_Datatype,MPI_INTEGER8,MPI_INTEGER,MPI_DOUBLE_PRECISION
    implicit none
    private
@@ -24,20 +23,24 @@ module lss_class
    
 
    !> Maximum number of bonds per particle
-   integer, parameter, public :: max_bond=200  !< Assumes something like a 7x7x7 stencil in 3D
+   integer, parameter, public :: max_bond=400  !< Assumes something like a 7x7x7 stencil in 3D
    
 
    !> Bonded solid particle definition
    type :: part
       !> MPI_DOUBLE_PRECISION data
-      real(WP) :: mw                         !< Weighted volume
-      real(WP) :: dil                        !< Element dilatation
+      real(WP) :: vonMises                   !< Element dilatation
       real(WP) :: vol                        !< Particle volume
+      real(WP) :: correcMag
       real(WP), dimension(max_bond) :: dbond !< Length of initial bonds
       real(WP), dimension(3) :: pos          !< Particle center coordinates
       real(WP), dimension(3) :: vel          !< Velocity of particle
       real(WP), dimension(3) :: Abond        !< Bond acceleration for particle
       real(WP), dimension(3) :: Afluid       !< Fluid acceleration for particle
+      real(WP), dimension(3) :: ipos         !< Initial position
+      real(WP), dimension(3) :: displacement !< Displacement
+      real(WP), dimension(3,3) :: F          !< Deformation gradient tensor
+      real(WP), dimension(3,3) :: PK_inv     !< First Piola-Kirchoff tensor times shape tensor inverse
       !> MPI_INTEGER data
       integer :: id                          !< ID the object is associated with
       integer :: i                           !< Unique index of particle (assumed >0)
@@ -48,7 +51,7 @@ module lss_class
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=2
-   integer           , dimension(part_nblock) :: part_lblock=[15+max_bond,7+max_bond]
+   integer           , dimension(part_nblock) :: part_lblock=[39+max_bond,7+max_bond]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -60,8 +63,6 @@ module lss_class
    
       ! This config is used for parallelization and for calculating bond/collision forces
       class(config), pointer :: cfg
-
-      type(ddadi) :: implicit                             !< Implicit solver for filtering
       
       ! This is the name of the solver
       character(len=str_medium) :: name='UNNAMED_LSS'
@@ -71,6 +72,9 @@ module lss_class
       real(WP) :: poisson_ratio                           !< Poisson's ratio of the material
       real(WP) :: rho                                     !< Density of the material
       real(WP) :: crit_energy                             !< Critical energy release
+      real(WP) :: beta                                       !< Damping constant
+      real(WP) :: cool_down_time
+      logical  :: continuous_damping                       !< True if you want damping on the whole time                                           
       
       ! Bonding parameters
       real(WP) :: delta                                   !< Bonding horizon (distance)
@@ -88,7 +92,7 @@ module lss_class
       type(part), dimension(:), allocatable :: g          !< Array of ghosts of type part
       
       ! Gravitational acceleration
-      real(WP), dimension(3) :: gravity=0.0_WP
+      real(WP), dimension(3) :: gravity=[0.0_WP,0.0_WP,0.0_WP]
       
       ! Solid volume fraction and momentum
       real(WP), dimension(:,:,:), allocatable :: VF       !< Volume fraction, cell-centered
@@ -109,11 +113,6 @@ module lss_class
       real(WP) :: VFmax                              !< Volume fraction info
       real(WP), dimension(3) :: ibmForce             !< Total force due to IBM
       integer  :: np_out                             !< Number of particles leaving the domain
-
-      ! Filtering operation
-      real(WP) :: filter_width                       !< Characteristic filter width
-      real(WP), dimension(:,:,:,:), allocatable :: div_x,div_y,div_z    !< Divergence operator
-      real(WP), dimension(:,:,:,:), allocatable :: grd_x,grd_y,grd_z    !< Gradient operator
       
    contains
       procedure :: bond_init                         !< Setup initial interparticle bonds
@@ -130,7 +129,10 @@ module lss_class
       procedure :: write                             !< Parallel write particles to file
       procedure :: read                              !< Parallel read particles from file
       procedure :: update_VF                         !< Compute volume fraction
-      procedure :: filter                            !< Apply volume filtering to field
+      procedure :: get_delta                         !< Compute regularized delta function
+      procedure :: interpolate                       !< Interpolation routine from mesh=>marker
+      procedure :: extrapolate                       !< Extrapolation routine from marker=>mesh
+      ! procedure :: stretch
    end type lss
    
    
@@ -148,11 +150,13 @@ contains
       real(WP), intent(in) :: d,h
       real(WP), parameter :: coeff=2.6_WP
       real(WP) :: hh
-      hh=coeff*h
+      ! hh=coeff*h
+      hh=h
       if (d.ge.hh) then
          wgauss=0.0_WP
       else
-         wgauss=(1.0_WP+4.0_WP*d/hh)*(1.0_WP-d/hh)**4
+         ! wgauss=(1.0_WP+4.0_WP*d/hh)*(1.0_WP-d/hh)**4
+         wgauss=(1.0_WP-d/h)**3
       end if
    end function wgauss
    
@@ -180,97 +184,15 @@ contains
       allocate(self%np_proc(1:self%cfg%nproc)); self%np_proc=0
       self%np_=0; self%np=0
       call self%resize(0)
-
+      
       ! Initialize MPI derived datatype for a particle
       call prepare_mpi_part()
-
+      
       ! Allocate VF array on cfg mesh
       allocate(self%VF(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VF=0.0_WP
       allocate(self%VFU(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFU=0.0_WP
       allocate(self%VFV(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFV=0.0_WP
       allocate(self%VFW(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFW=0.0_WP
-
-      ! Allocate finite volume divergence operators
-      allocate(self%div_x(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      allocate(self%div_y(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      allocate(self%div_z(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      ! Create divergence operator to cell center [xm,ym,zm]
-      do k=self%cfg%kmin_,self%cfg%kmax_
-         do j=self%cfg%jmin_,self%cfg%jmax_
-            do i=self%cfg%imin_,self%cfg%imax_
-               self%div_x(:,i,j,k)=self%cfg%dxi(i)*[-1.0_WP,+1.0_WP] !< Divergence from [x ,ym,zm]
-               self%div_y(:,i,j,k)=self%cfg%dyi(j)*[-1.0_WP,+1.0_WP] !< Divergence from [xm,y ,zm]
-               self%div_z(:,i,j,k)=self%cfg%dzi(k)*[-1.0_WP,+1.0_WP] !< Divergence from [xm,ym,z ]
-            end do
-         end do
-      end do
-
-      ! Allocate finite difference velocity gradient operators
-      allocate(self%grd_x(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< X-face-centered
-      allocate(self%grd_y(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< Y-face-centered
-      allocate(self%grd_z(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< Z-face-centered
-      ! Create gradient coefficients to cell faces
-      do k=self%cfg%kmin_,self%cfg%kmax_+1
-         do j=self%cfg%jmin_,self%cfg%jmax_+1
-            do i=self%cfg%imin_,self%cfg%imax_+1
-               self%grd_x(:,i,j,k)=self%cfg%dxmi(i)*[-1.0_WP,+1.0_WP] !< Gradient in x from [xm,ym,zm] to [x,ym,zm]
-               self%grd_y(:,i,j,k)=self%cfg%dymi(j)*[-1.0_WP,+1.0_WP] !< Gradient in y from [xm,ym,zm] to [xm,y,zm]
-               self%grd_z(:,i,j,k)=self%cfg%dzmi(k)*[-1.0_WP,+1.0_WP] !< Gradient in z from [xm,ym,zm] to [xm,ym,z]
-            end do
-         end do
-      end do
-
-      ! Loop over the domain and zero divergence in walls
-      do k=self%cfg%kmin_,self%cfg%kmax_
-         do j=self%cfg%jmin_,self%cfg%jmax_
-            do i=self%cfg%imin_,self%cfg%imax_
-               if (self%cfg%VF(i,j,k).eq.0.0_WP) then
-                  self%div_x(:,i,j,k)=0.0_WP
-                  self%div_y(:,i,j,k)=0.0_WP
-                  self%div_z(:,i,j,k)=0.0_WP
-               end if
-            end do
-         end do
-      end do
-      
-      ! Zero out gradient to wall faces
-      do k=self%cfg%kmin_,self%cfg%kmax_+1
-         do j=self%cfg%jmin_,self%cfg%jmax_+1
-            do i=self%cfg%imin_,self%cfg%imax_+1
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i-1,j,k).eq.0.0_WP) self%grd_x(:,i,j,k)=0.0_WP
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i,j-1,k).eq.0.0_WP) self%grd_y(:,i,j,k)=0.0_WP
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i,j,k-1).eq.0.0_WP) self%grd_z(:,i,j,k)=0.0_WP
-            end do
-         end do
-      end do
-
-      ! Adjust metrics to account for lower dimensionality
-      if (self%cfg%nx.eq.1) then
-         self%div_x=0.0_WP
-         self%grd_x=0.0_WP
-      end if
-      if (self%cfg%ny.eq.1) then
-         self%div_y=0.0_WP
-         self%grd_y=0.0_WP
-      end if
-      if (self%cfg%nz.eq.1) then
-         self%div_z=0.0_WP
-         self%grd_z=0.0_WP
-      end if
-
-      ! Create implicit solver object for filtering
-      self%implicit=ddadi(cfg=self%cfg,name='Filter',nst=7)
-      self%implicit%stc(1,:)=[ 0, 0, 0]
-      self%implicit%stc(2,:)=[+1, 0, 0]
-      self%implicit%stc(3,:)=[-1, 0, 0]
-      self%implicit%stc(4,:)=[ 0,+1, 0]
-      self%implicit%stc(5,:)=[ 0,-1, 0]
-      self%implicit%stc(6,:)=[ 0, 0,+1]
-      self%implicit%stc(7,:)=[ 0, 0,-1]
-      call self%implicit%init()
-
-      ! Set default filter width
-      self%filter_width=2.0_WP*self%cfg%min_meshsize
 
       ! Log/screen output
       logging: block
@@ -355,8 +277,6 @@ contains
          do n1=1,this%np_
             ! Create copy of our particle
             p1=this%p(n1)
-            ! Zero out weighted volume
-            p1%mw=0.0_WP
             ! Zero out bonds
             p1%ibond=0
             p1%nbond=0
@@ -386,8 +306,6 @@ contains
                            if (p1%nbond.gt.max_bond) call die('[lss_class bond_init] Number of detected bonds is larger than max allowed')
                            p1%ibond(p1%nbond)=p2%i
                            p1%dbond(p1%nbond)=dist
-                           ! Increment weighted volume
-                           p1%mw=p1%mw+wgauss(dist,this%delta)*dist**2*p1%vol
                            ! Determine minimum bond distance
                            this%min_dist=min(this%min_dist,dist)
                         end if
@@ -395,8 +313,6 @@ contains
                   end do
                end do
             end do
-            ! Zero out initial dilatation
-            p1%dil=0.0_WP
             ! Copy back the particle
             this%p(n1)=p1
          end do
@@ -407,6 +323,7 @@ contains
       ! Clean up
       if (allocated(npic)) deallocate(npic)
       if (allocated(ipic)) deallocate(ipic)
+
 
    end subroutine bond_init
 
@@ -465,20 +382,35 @@ contains
          
       end block pic_prep
       
-      ! Update weighted volume and dilatation
-      update_weighted_vol_and_dilatation: block
+      ! Update shape and deformation gradient tensor
+      update_tensors: block
+         use mathtools
          integer :: i,j,k,n1,nn,n2
          type(part) :: p1,p2
          integer :: nb,nbond
-         real(WP), dimension(3) :: rpos
-         real(WP) :: dist
+         real(WP), dimension(3) :: rpos, xi
+         real(WP) :: dist,w,mu,kk,detK,traceE,J_F,sigma_vm, traceS
+         real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,S_mat,K_inv,sigma, s_dev
+
+         mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio) ! shear modulus
+         kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio) ! bulk moduls
+         I_mat = 0.0_WP
+         S_mat = 0.0_WP
+         traceE = 0.0_WP
+         E_mat = 0.0_WP
+         K_inv = 0.0_WP
+         I_mat(1,1) = 1.0_WP
+         I_mat(2,2) = 1.0_WP
+         I_mat(3,3) = 1.0_WP
+
          ! Loop over particles
          do n1=1,this%np_
             ! Create copy of our particle
             p1=this%p(n1)
             ! Zero out weighted volume and dilatation
-            p1%mw=0.0_WP
-            p1%dil=0.0_WP
+            K_mat=0.0_WP
+            K_inv = 0.0_WP
+            p1%F=0.0_WP
             ! Loop over neighbor cells
             do k=p1%ind(3)-this%nb,p1%ind(3)+this%nb
                do j=p1%ind(2)-this%nb,p1%ind(2)+this%nb
@@ -495,55 +427,90 @@ contains
                         ! Check if a bond exists
                         do nb=1,max_bond
                            if (p1%ibond(nb).eq.p2%i) then
-                              ! Increment weighted volume
-                              p1%mw=p1%mw+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)**2*p2%vol
                               ! Get current distance
                               rpos=p2%pos-p1%pos
-                              dist=sqrt(dot_product(rpos,rpos))
-                              ! Increment dilatation
-                              p1%dil=p1%dil+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)*(dist-p1%dbond(nb))*p2%vol
+                              !print *, rpos
+                              ! Compute summation of K
+                              xi = p2%ipos-p1%ipos
+                              w = wgauss(p1%dbond(nb),this%delta)
+                              K_mat(1,1)=K_mat(1,1)+xi(1)*xi(1)*w*p2%vol; K_mat(1,2)=K_mat(1,2)+xi(1)*xi(2)*w*p2%vol; K_mat(1,3)=K_mat(1,3)+xi(1)*xi(3)*w*p2%vol;
+                              K_mat(2,1)=K_mat(2,1)+xi(2)*xi(1)*w*p2%vol; K_mat(2,2)=K_mat(2,2)+xi(2)*xi(2)*w*p2%vol; K_mat(2,3)=K_mat(2,3)+xi(2)*xi(3)*w*p2%vol;
+                              K_mat(3,1)=K_mat(3,1)+xi(3)*xi(1)*w*p2%vol; K_mat(3,2)=K_mat(3,2)+xi(3)*xi(2)*w*p2%vol; K_mat(3,3)=K_mat(3,3)+xi(3)*xi(3)*w*p2%vol;
+                 
+                              ! Compute interior summation of F
+                              p1%F(1,1)=p1%F(1,1)+rpos(1)*xi(1)*w*p2%vol; p1%F(1,2)=p1%F(1,2)+rpos(1)*xi(2)*w*p2%vol; p1%F(1,3)=p1%F(1,3)+rpos(1)*xi(3)*w*p2%vol;
+                              p1%F(2,1)=p1%F(2,1)+rpos(2)*xi(1)*w*p2%vol; p1%F(2,2)=p1%F(2,2)+rpos(2)*xi(2)*w*p2%vol; p1%F(2,3)=p1%F(2,3)+rpos(2)*xi(3)*w*p2%vol;
+                              p1%F(3,1)=p1%F(3,1)+rpos(3)*xi(1)*w*p2%vol; p1%F(3,2)=p1%F(3,2)+rpos(3)*xi(2)*w*p2%vol; p1%F(3,3)=p1%F(3,3)+rpos(3)*xi(3)*w*p2%vol;
                            end if
                         end do
                      end do
                   end do
                end do
             end do
-            ! Rescale dilatation
-            if (p1%mw.gt.epsilon(1.0_WP)) then
-               if (is2D) then
-                  ! 2D plane strain
-                  p1%dil=p1%dil*2.0_WP/p1%mw
-               else
-                  ! 3D
-                  p1%dil=p1%dil*3.0_WP/p1%mw
-               end if
-            else
-               p1%dil=0.0_WP
-            end if
+            ! Apply inverse of K to get F = F*K^-1
+            detK = K_mat(1,1)*(K_mat(2,2)*K_mat(3,3)-K_mat(2,3)*K_mat(3,2)) &
+                  -K_mat(1,2)*(K_mat(2,1)*K_mat(3,3)-K_mat(2,3)*K_mat(3,1)) &
+                  +K_mat(1,3)*(K_mat(2,1)*K_mat(3,2)-K_mat(2,2)*K_mat(3,1))
+            K_inv(1,1) = (K_mat(2,2)*K_mat(3,3) - K_mat(2,3)*K_mat(3,2))/detK
+            K_inv(2,1) = -(K_mat(2,1)*K_mat(3,3) - K_mat(2,3)*K_mat(3,1))/detK
+            K_inv(3,1) = (K_mat(2,1)*K_mat(3,2) - K_mat(2,2)*K_mat(3,1))/detK
+            K_inv(1,2) = -(K_mat(1,2)*K_mat(3,3) - K_mat(1,3)*K_mat(3,2))/detK
+            K_inv(2,2) = (K_mat(1,1)*K_mat(3,3) - K_mat(1,3)*K_mat(3,1))/detK
+            K_inv(3,2) = -(K_mat(1,1)*K_mat(3,2) - K_mat(1,2)*K_mat(3,1))/detK
+            K_inv(1,3) = (K_mat(1,2)*K_mat(2,3) - K_mat(1,3)*K_mat(2,2))/detK
+            K_inv(2,3) = -(K_mat(1,1)*K_mat(2,3) - K_mat(1,3)*K_mat(2,1))/detK
+            K_inv(3,3) = (K_mat(1,1)*K_mat(2,2) - K_mat(1,2)*K_mat(2,1))/detK
+
+
+            p1%F = MATMUL(p1%F,K_inv)
+            
+            ! Compute first Piola-Kirchoff stress tensor - constitutive model dependent
+            E_mat = 0.5_WP * (MATMUL(TRANSPOSE(p1%F),p1%F)-I_mat)
+            traceE = E_mat(1,1) + E_mat(2,2) + E_mat(3,3)
+            S_mat = (kk-2.0_WP/3.0_WP*mu)*traceE*I_mat + 2.0_WP*mu*E_mat
+            p1%PK_inv = MATMUL(MATMUL(p1%F,S_mat),K_inv)
+
+            J_F = p1%F(1,1)*(p1%F(2,2)*p1%F(3,3)-p1%F(2,3)*p1%F(3,2)) &
+               -p1%F(1,2)*(p1%F(2,1)*p1%F(3,3)-p1%F(2,3)*p1%F(3,1)) &
+               +p1%F(1,3)*(p1%F(2,1)*p1%F(3,2)-p1%F(2,2)*p1%F(3,1))
+
+            sigma = MATMUL(MATMUL(p1%F, S_mat), TRANSPOSE(p1%F)) / J_F
+
+            ! Deviatoric part
+            traceS = sigma(1,1) + sigma(2,2) + sigma(3,3)
+            s_dev = sigma - (traceS/3.0_WP)*I_mat
+
+            ! Von Mises
+            p1%vonMises = sqrt(1.5_WP * (s_dev(1,1)**2 + s_dev(2,2)**2 + s_dev(3,3)**2 &
+                                       + 2.0_WP*s_dev(1,2)**2 + 2.0_WP*s_dev(1,3)**2 &
+                                       + 2.0_WP*s_dev(2,3)**2))
+
             ! Copy back the particle
             this%p(n1)=p1
          end do
-       end block update_weighted_vol_and_dilatation
+       end block update_tensors
       
       ! Re-communicate particles in ghost cells to update dil and mw
       call this%share()
       
-      ! Update bond force, including collision force
+      ! Update bond force, including collision force, and SED
       update_bond_force: block
          use mpi_f08,  only: MPI_ALLREDUCE,MPI_MIN,MPI_IN_PLACE
          use parallel, only: MPI_REAL_WP
          use mathtools, only: Pi
          integer :: i,j,k,n1,nn,n2,ierr
          type(part) :: p1,p2
-         real(WP), dimension(3) :: rpos,t12,t21
-         real(WP) :: dist,beta,alpha,ed,t
-         real(WP) :: stretch,max_stretch,mu,kk
+         real(WP), dimension(3) :: rpos,t1,t2,tc,xi,z
+         real(WP), dimension(3,3) :: PK_inv
+         real(WP) :: dist,t,w
+         real(WP) :: stretch,max_stretch,mu,kk, correcMagNum, correcMagDenom
          real(WP) :: nc,rc,kc
          integer :: nb,nbond
          logical :: found_bond
          ! Recompute a few physical parameters
          mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
          kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio)
+         
          if (is2D) then
             if (this%cfg%nx.eq.1) t=this%cfg%xL
             if (this%cfg%ny.eq.1) t=this%cfg%yL
@@ -564,6 +531,11 @@ contains
             p1=this%p(n1)
             ! Zero out bond force
             p1%Abond=0.0_WP
+            ! Zero out PK_inv
+            PK_inv=0.0_WP
+            ! Zero out correcmag num and denom
+            correcMagNum = 0.0_WP
+            correcMagDenom = 0.0_WP
             ! Loop over neighbor cells
             do k=p1%ind(3)-this%nb,p1%ind(3)+this%nb
                do j=p1%ind(2)-this%nb,p1%ind(2)+this%nb
@@ -592,36 +564,19 @@ contains
                                  p1%dbond(nb)=0.0_WP
                                  cycle
                               end if
-                              ! Particle 1
-                              if (is2D) then
-                                 ! 2D plane strain
-                                 beta  = 2.0_WP * kk * p1%dil
-                                 alpha = 8.0_WP * mu / p1%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p1%dil / 2.0_WP)
-                              else
-                                 ! 3D
-                                 beta  = 3.0_WP * kk * p1%dil
-                                 alpha = 15.0_WP * mu / p1%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p1%dil / 3.0_WP)
-                              end if
+                              w = wgauss(p1%dbond(nb),this%delta)
+                              xi = p2%ipos-p1%ipos
                               ! Force density 1->2
-                              t12=+wgauss(p1%dbond(nb),this%delta)*(beta/p1%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
-                              ! Particle 2
-                              if (is2D) then
-                                 ! 2D plane strain
-                                 beta  = 2.0_WP * kk * p2%dil
-                                 alpha = 8.0_WP * mu / p2%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p2%dil / 2.0_WP)
-                              else
-                                 ! 3D
-                                 beta  = 3.0_WP * kk * p2%dil
-                                 alpha = 15.0_WP * mu / p2%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p2%dil / 3.0_WP)
-                              end if
+                              t1 = w*MATMUL(p1%PK_inv,xi)                              
                               ! Force density 2->1
-                              t21=-wgauss(p1%dbond(nb),this%delta)*(beta/p2%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
-                              ! Increment bond force
-                              p1%Abond=p1%Abond+(t12-t21)*p1%vol/this%rho
+                              t2 = w*MATMUL(p2%PK_inv,xi)    
+                              ! Force correction term
+                              z = rpos-MATMUL(p1%F,xi)
+                              tc = w*(9.0_WP*kk/(Pi * this%delta**4))*(dot_product(xi,z)/(sqrt(dot_product(xi,xi)))**3)*xi       
+                              ! Compute bond acceleration
+                              p1%Abond=p1%Abond+(t1+t2+tc)*p2%vol/this%rho
+                              correcMagNum = correcMagNum + sqrt(sum(tc**2))
+                              correcMagDenom = correcMagDenom + max((sqrt(sum(t1**2)) + sqrt(sum(t2**2)) + sqrt(sum(tc**2))),epsilon(1.0_WP))
                               ! If still here, we have an active bond
                               found_bond=.true.
                               ! Determine minimum bond distance
@@ -630,18 +585,21 @@ contains
                            end if
                         end do
                         ! Add collision force now
-                        if (is2D) then
-                           rc=p1%vol**(1.0_WP/2.0_WP)
-                        else
-                           rc=p1%vol**(1.0_WP/3.0_WP)
-                        end if
-                        if (.not.found_bond.and.p1%i.ne.p2%i.and.dist.lt.rc) then
-                           p1%Abond=p1%Abond-max(kc*((rc/dist)**nc-1.0_WP),0.0_WP)*(rpos/dist)*p1%vol/this%rho
-                        end if
+                        ! if (is2D) then
+                        !    rc=p1%vol**(1.0_WP/2.0_WP)
+                        ! else
+                        !    rc=p1%vol**(1.0_WP/3.0_WP)
+                        ! end if
+                        ! if (.not.found_bond.and.p1%i.ne.p2%i.and.dist.lt.rc) then
+                        !    p1%Abond=p1%Abond-max(kc*((rc/dist)**nc-1.0_WP),0.0_WP)*(rpos/dist)*p1%vol/this%rho
+                        !    p1%flag = -2
+                        ! end if
                      end do
                   end do
                end do
             end do
+            ! Sum up contribution
+            p1%correcMag = correcMagNum/correcMagDenom
             ! Deal with dimensionality
             if (this%cfg%nx.eq.1) p1%Abond(1)=0.0_WP
             if (this%cfg%ny.eq.1) p1%Abond(2)=0.0_WP
@@ -664,26 +622,36 @@ contains
    !> p%id=-2 => do not solve for position nor velocity
    !> p%id=-1 => do not solve for velocity
    !> p%id= 0 => do not update force
-   subroutine advance(this,dt,stress_x,stress_y,stress_z)
+   
+   subroutine advance(this,dt,cool_down,continuous)!,stress_x,stress_y,stress_z)
       use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
       use mathtools, only: Pi
       implicit none
       class(lss), intent(inout) :: this
       real(WP), intent(inout) :: dt  !< Timestep size over which to advance
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_x  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_y  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_z  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      logical, intent(in) :: cool_down,continuous
+      ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_x  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_y  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      ! real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_z  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
       integer :: n,ierr
-      real(WP), dimension(3) :: stress
+      real(WP) :: beta
+      ! real(WP), dimension(3) :: stress
 
        ! Zero out number of particles removed
       this%np_out=0
-      
+      if(cool_down.or.continuous) then
+         beta = this%beta
+      else
+         beta = 0.0_WP
+      end if 
       ! Advance velocity based on old force and position based on mid-velocity
+      ! print*, beta
       do n=1,this%np_
+         if(cool_down.and.this%p(n)%id.eq.-1) this%p(n)%vel = 0.0_WP
          ! Advance with Verlet scheme
-         if (this%p(n)%id.gt.-1) this%p(n)%vel=this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
+         if (this%p(n)%id.gt.-1) this%p(n)%vel=(1.0_WP-beta)*this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
          if (this%p(n)%id.gt.-2) this%p(n)%pos=this%p(n)%pos+dt*this%p(n)%vel
+         this%p(n)%displacement=this%p(n)%pos-this%p(n)%ipos
          ! Relocalize
          this%p(n)%ind=this%cfg%get_ijk_global(this%p(n)%pos,this%p(n)%ind)
          ! Correct the position to take into account periodicity
@@ -712,14 +680,16 @@ contains
       ! Advance velocity only based on new force
       do n=1,this%np_
          ! Advance with Verlet scheme
-         stress=this%cfg%get_velocity(pos=this%p(n)%pos,i0=this%p(n)%ind(1),j0=this%p(n)%ind(2),k0=this%p(n)%ind(3),U=stress_x,V=stress_y,W=stress_z)
-         this%p(n)%Afluid=stress/this%rho
          if (this%p(n)%id.le.-1) cycle
-         this%p(n)%vel=this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
+         ! stress=this%cfg%get_velocity(pos=this%p(n)%pos,i0=this%p(n)%ind(1),j0=this%p(n)%ind(2),k0=this%p(n)%ind(3),U=stress_x,V=stress_y,W=stress_z)
+         ! this%p(n)%Afluid=stress/this%rho
+         ! this%p(n)%Afluid=0.0_WP
+         ! A Fluid is zero in the init, but is non-zero for pulling elements if specified
+         this%p(n)%vel=this%p(n)%vel*(1.0_WP-beta)+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
       end do
       
       ! Recompute volume fraction
-      call this%update_VF()
+      ! call this%update_VF()
       
       ! Log/screen output
       logging: block
@@ -737,6 +707,112 @@ contains
       
    end subroutine advance
 
+   ! subroutine stretch(this,dt)!,stress_x,stress_y,stress_z)
+   !    use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
+   !    use mathtools, only: Pi
+   !    implicit none
+   !    class(lss), intent(inout) :: this
+   !    real(WP), intent(inout) :: dt  !< Timestep size over which to advance
+   !    real(WP) :: mu
+   !    integer :: n,ierr
+   !    real(WP), dimension(:,:),   allocatable :: temp_gd
+
+   !    allocate(temp_gd(this%np_, 3))
+   !    !========================================================================================
+   !    ! X-Axis Stretch:
+   !     ! Zero out number of particles removed
+   !    this%np_out=0
+   !    do n=1,this%np_
+   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+   !        this%p(n)%pos(1)=this%p(n)%pos(1)*1.001_WP
+   !    end do
+      
+   !    ! Communicate particles
+   !    call this%sync()
+
+   !    ! Calculate bond force
+   !    call this%get_bond_force()
+
+   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+
+   !    do n=1,this%np_
+   !       temp_gd(n,1)=0.001_WP/this%p(n)%dil
+   !    end do
+
+   !    !========================================================================================
+   !    ! Y-Axis Stretch:
+   !     ! Zero out number of particles removed
+   !    this%np_out=0
+   !    do n=1,this%np_
+   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+   !       this%p(n)%pos(1)=this%p(n)%pos(1)/1.001_WP
+   !       this%p(n)%pos(2)=this%p(n)%pos(2)*1.001_WP
+   !    end do
+      
+   !    ! Communicate particles
+   !    call this%sync()
+
+   !    ! Calculate bond force
+   !    call this%get_bond_force()
+
+   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+
+   !    do n=1,this%np_
+   !       temp_gd(n,2)=0.001_WP/this%p(n)%dil
+   !    end do
+
+   !    !========================================================================================
+   !    ! Z-Axis Stretch:
+   !     ! Zero out number of particles removed
+   !    this%np_out=0
+   !    do n=1,this%np_
+   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+   !        this%p(n)%pos(2)=this%p(n)%pos(2)/1.001_WP
+   !        this%p(n)%pos(3)=this%p(n)%pos(3)*1.001_WP
+   !    end do
+      
+   !    ! Communicate particles
+   !    call this%sync()
+
+   !    ! Calculate bond force
+   !    call this%get_bond_force()
+
+   !    mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+
+   !    do n=1,this%np_
+   !     temp_gd(n,3)=0.001_WP/this%p(n)%dil
+   !    end do
+
+   !    ! Put the particle back where it was
+   !    do n=1,this%np_
+   !      this%p(n)%pos(3)=this%p(n)%pos(3)/1.001_WP
+   !    end do
+
+   !    !======================================================================================
+
+   !    ! Now stretch particle for the first time step
+
+   !    do n=1,this%np_
+   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+   !       this%p(n)%gd=temp_gd(n,:)
+   !    end do
+
+   !    do n=1,this%np_
+   !       ! Stretch the beam along the x axis with a uniform strain-rate of 0.001
+   !        this%p(n)%pos=this%p(n)%pos*1.001_WP
+   !        this%p(n)%displacement=this%p(n)%pos-this%p(n)%ipos
+   !    end do
+      
+   !    ! Communicate particles
+   !    call this%sync()
+
+   !    ! Calculate bond force
+   !    call this%get_bond_force()
+
+   !    deallocate(temp_gd)
+      
+      
+   ! end subroutine stretch
 
    !> Update particle volume fraction using our current particles
    subroutine update_VF(this)
@@ -750,99 +826,141 @@ contains
          ! Skip inactive particle
          if (this%p(i)%flag.eq.1) cycle
          ! Transfer volume to mesh
-         call this%cfg%set_scalar(Sp=this%p(i)%vol,                 pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VF ,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFU,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFV,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFW,bc='n')
+         call this%extrapolate(Ap=this%p(i)%vol,xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=this%VF,dir='SC')
+         call this%extrapolate(Ap=this%p(i)%vol*this%p(i)%vel(1),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=this%VFU,dir='U')
+         call this%extrapolate(Ap=this%p(i)%vol*this%p(i)%vel(2),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=this%VFV,dir='V')
+         call this%extrapolate(Ap=this%p(i)%vol*this%p(i)%vel(3),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=this%VFW,dir='W')
       end do
-      this%VF =this%VF /this%cfg%vol
-      this%VFU=this%VFU/this%cfg%vol
-      this%VFV=this%VFV/this%cfg%vol
-      this%VFW=this%VFW/this%cfg%vol
       ! Sum at boundaries
-      call this%cfg%syncsum(this%VF )
+      call this%cfg%syncsum(this%VF)
       call this%cfg%syncsum(this%VFU)
       call this%cfg%syncsum(this%VFV)
       call this%cfg%syncsum(this%VFW)
-      ! Apply volume filter
-      call this%filter(this%VF )
-      call this%filter(this%VFU)
-      call this%filter(this%VFV)
-      call this%filter(this%VFW)
       ! Clip
+      where (this%VF.gt.1.0_WP) this%VF=1.0_WP
       where (this%VF.lt.0.0_WP) this%VF=0.0_WP
-      this%VF=min(this%VF,1.0_WP-epsilon(1.0_WP))
-
     end subroutine update_VF
     
 
-    !> Laplacian filtering operation
-    subroutine filter(this,A)
+   !> Compute regularized delta function
+   subroutine get_delta(this,delta,ic,jc,kc,xp,yp,zp,dir)
       implicit none
       class(lss), intent(inout) :: this
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: A     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP) :: filter_coeff
-      integer :: i,j,k,n,nstep
-      real(WP), dimension(:,:,:), allocatable :: FX,FY,FZ
-
-      ! Recompute filter coefficient
-      filter_coeff=max(this%filter_width**2-this%cfg%min_meshsize**2,0.0_WP)/(16.0_WP*log(2.0_WP))
-      if (filter_coeff.le.0.0_WP) return
-
-      ! Allocate flux arrays
-      allocate(FX(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-      allocate(FY(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-      allocate(FZ(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-
-      if (.not.this%implicit%setup_done) then
-         ! Prepare diffusive operator (only need to do this once)
-         do k=this%cfg%kmin_,this%cfg%kmax_
-            do j=this%cfg%jmin_,this%cfg%jmax_
-               do i=this%cfg%imin_,this%cfg%imax_
-                  this%implicit%opr(1,i,j,k)=1.0_WP-(this%div_x(+1,i,j,k)*filter_coeff*this%grd_x(-1,i+1,j,k)+&
-                  &                                  this%div_x( 0,i,j,k)*filter_coeff*this%grd_x( 0,i  ,j,k)+&
-                  &                                  this%div_y(+1,i,j,k)*filter_coeff*this%grd_y(-1,i,j+1,k)+&
-                  &                                  this%div_y( 0,i,j,k)*filter_coeff*this%grd_y( 0,i,j  ,k)+&
-                  &                                  this%div_z(+1,i,j,k)*filter_coeff*this%grd_z(-1,i,j,k+1)+&
-                  &                                  this%div_z( 0,i,j,k)*filter_coeff*this%grd_z( 0,i,j,k  ))
-                  this%implicit%opr(2,i,j,k)=      -(this%div_x(+1,i,j,k)*filter_coeff*this%grd_x( 0,i+1,j,k))
-                  this%implicit%opr(3,i,j,k)=      -(this%div_x( 0,i,j,k)*filter_coeff*this%grd_x(-1,i  ,j,k))
-                  this%implicit%opr(4,i,j,k)=      -(this%div_y(+1,i,j,k)*filter_coeff*this%grd_y( 0,i,j+1,k))
-                  this%implicit%opr(5,i,j,k)=      -(this%div_y( 0,i,j,k)*filter_coeff*this%grd_y(-1,i,j  ,k))
-                  this%implicit%opr(6,i,j,k)=      -(this%div_z(+1,i,j,k)*filter_coeff*this%grd_z( 0,i,j,k+1))
-                  this%implicit%opr(7,i,j,k)=      -(this%div_z( 0,i,j,k)*filter_coeff*this%grd_z(-1,i,j,k  ))
-               end do
-            end do
-         end do
+      real(WP), intent(out) :: delta   !< Return delta function
+      integer, intent(in) :: ic,jc,kc  !< Cell index
+      real(WP), intent(in) :: xp,yp,zp !< Position of marker 
+      character(len=*) :: dir
+      real(WP) :: deltax,deltay,deltaz,r
+      
+      ! Compute in X
+      if (trim(adjustl(dir)).eq.'U') then
+         r=(xp-this%cfg%x(ic))*this%cfg%dxmi(ic)
+         deltax=roma_kernel(r)*this%cfg%dxmi(ic)
+      else
+         r=(xp-this%cfg%xm(ic))*this%cfg%dxi(ic)
+         deltax=roma_kernel(r)*this%cfg%dxi(ic)
       end if
-      ! Explicit step
-      do k=this%cfg%kmin_,this%cfg%kmax_+1
-         do j=this%cfg%jmin_,this%cfg%jmax_+1
-            do i=this%cfg%imin_,this%cfg%imax_+1
-               FX(i,j,k)=filter_coeff*sum(this%grd_x(:,i,j,k)*A(i-1:i,j,k))
-               FY(i,j,k)=filter_coeff*sum(this%grd_y(:,i,j,k)*A(i,j-1:j,k))
-               FZ(i,j,k)=filter_coeff*sum(this%grd_z(:,i,j,k)*A(i,j,k-1:k))
+      
+      ! Compute in Y
+      if (trim(adjustl(dir)).eq.'V') then
+         r=(yp-this%cfg%y(jc))*this%cfg%dymi(jc)
+         deltay=roma_kernel(r)*this%cfg%dymi(jc)
+      else
+         r=(yp-this%cfg%ym(jc))*this%cfg%dyi(jc)
+         deltay=roma_kernel(r)*this%cfg%dyi(jc)
+      end if
+      
+      ! Compute in Z
+      if (trim(adjustl(dir)).eq.'W') then
+         r=(zp-this%cfg%z(kc))*this%cfg%dzmi(kc)
+         deltaz=roma_kernel(r)*this%cfg%dzmi(kc)
+      else
+         r=(zp-this%cfg%zm(kc))*this%cfg%dzi(kc)
+         deltaz=roma_kernel(r)*this%cfg%dzi(kc)
+      end if
+      !else
+      
+      ! Put it all together
+      delta=deltax*deltay*deltaz
+      
+   contains
+      ! Mollification kernel
+      ! Roma A, Peskin C and Berger M 1999 J. Comput. Phys. 153 509–534
+      function roma_kernel(r) result(phi)
+         implicit none
+         real(WP), intent(in) :: r
+         real(WP)             :: phi
+         if (abs(r).le.0.5_WP) then
+            phi=1.0_WP/3.0_WP*(1.0_WP+sqrt(-3.0_WP*r**2+1.0_WP))
+         else if (abs(r).gt.0.5_WP .and. abs(r).le.1.5_WP) then
+            phi=1.0_WP/6.0_WP*(5.0_WP-3.0_WP*abs(r)-sqrt(-3.0_WP*(1.0_WP-abs(r))**2+1.0_WP))
+         else
+            phi=0.0_WP
+         end if
+      end function roma_kernel
+      
+   end subroutine get_delta
+
+
+   !> Interpolation routine
+   function interpolate(this,A,xp,yp,zp,ip,jp,kp,dir) result(Ap)
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in) :: A         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), intent(in) :: xp,yp,zp
+      integer, intent(in) :: ip,jp,kp
+      character(len=*) :: dir
+      real(WP) :: Ap
+      integer :: di,dj,dk
+      integer :: i1,i2,j1,j2,k1,k2
+      real(WP), dimension(-2:+2,-2:+2,-2:+2) :: delta
+      ! Get the interpolation points
+      i1=ip-2; i2=ip+2
+      j1=jp-2; j2=jp+2
+      k1=kp-2; k2=kp+2
+      ! Loop over neighboring cells and compute regularized delta function
+      do dk=-2,+2
+         do dj=-2,+2
+            do di=-2,+2
+               call this%get_delta(delta=delta(di,dj,dk),ic=ip+di,jc=jp+dj,kc=kp+dk,xp=xp,yp=yp,zp=zp,dir=trim(dir))
             end do
          end do
       end do
-      do k=this%cfg%kmin_,this%cfg%kmax_
-         do j=this%cfg%jmin_,this%cfg%jmax_
-            do i=this%cfg%imin_,this%cfg%imax_
-               this%implicit%rhs(i,j,k)=sum(this%div_x(:,i,j,k)*FX(i:i+1,j,k))+sum(this%div_y(:,i,j,k)*FY(i,j:j+1,k))+sum(this%div_z(:,i,j,k)*FZ(i,j,k:k+1))
+      ! Perform the actual interpolation on Ap
+      Ap = sum(delta*A(i1:i2,j1:j2,k1:k2))*this%cfg%vol(ip,jp,kp)
+   end function interpolate
+   
+   
+   !> Extrapolation routine
+   subroutine extrapolate(this,Ap,xp,yp,zp,ip,jp,kp,A,dir)
+      use messager, only: die
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:) :: A         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), intent(in) :: xp,yp,zp
+      integer, intent(in) :: ip,jp,kp
+      real(WP), intent(in) :: Ap
+      character(len=*) :: dir
+      real(WP), dimension(-2:+2,-2:+2,-2:+2) :: delta
+      integer  :: di,dj,dk
+      ! If particle has left processor domain or reached last ghost cell, kill job
+      if ( ip.lt.this%cfg%imin_-1.or.ip.gt.this%cfg%imax_+1.or.&
+      &    jp.lt.this%cfg%jmin_-1.or.jp.gt.this%cfg%jmax_+1.or.&
+      &    kp.lt.this%cfg%kmin_-1.or.kp.gt.this%cfg%kmax_+1) then
+         write(*,*) ip,jp,kp,xp,yp,zp
+         call die('[df extrapolate] Particle has left the domain')
+      end if
+      ! Loop over neighboring cells and compute regularized delta function
+      do dk=-2,+2
+         do dj=-2,+2
+            do di=-2,+2
+               call this%get_delta(delta=delta(di,dj,dk),ic=ip+di,jc=jp+dj,kc=kp+dk,xp=xp,yp=yp,zp=zp,dir=trim(dir))
             end do
          end do
       end do
-      ! Implicit step
-      call this%implicit%setup()
-      this%implicit%sol=0.0_WP
-      call this%implicit%solve()
-      A=A+this%implicit%sol
-      call this%cfg%sync(A)
-
-      ! Deallocate flux arrays
-      deallocate(FX,FY,FZ)
-
-    end subroutine filter
+      ! Perform the actual extrapolation on A
+      A(ip-2:ip+2,jp-2:jp+2,kp-2:kp+2)=A(ip-2:ip+2,jp-2:jp+2,kp-2:kp+2)+delta*Ap
+   end subroutine extrapolate
 
 
    !> Calculate the CFL
@@ -874,7 +992,7 @@ contains
       kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio)
       mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)      
       a=sqrt((kk+4.0_WP*mu/3.0_WP)/this%rho)
-      this%CFLp_a=dt*a/this%delta
+      this%CFLp_a=dt*a*3/this%delta
       
       ! Return the maximum CFL
       cfl=max(this%CFLp_x,this%CFLp_y,this%CFLp_z,this%CFLp_a)

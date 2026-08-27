@@ -29,6 +29,7 @@ module simulation
    
    !> Private work arrays
    real(WP), dimension(:,:,:,:,:), allocatable :: dQdt
+   real(WP), dimension(:,:,:,:)  , allocatable :: srcQ
    real(WP), dimension(:,:,:)    , allocatable :: Ui,Vi,Wi,Ma,beta,visc,visc_t,div
 
    !> Post-shock viscosity and temperature
@@ -42,9 +43,6 @@ module simulation
    real(WP) :: rho1,p1,u1,M1
    real(WP) :: rho2,p2,u2,M2
    real(WP) :: Re
-
-   !> Max timestep size for solid solver
-   real(WP) :: ls_dt,ls_dt_max
    
  contains
 
@@ -132,48 +130,6 @@ module simulation
      if (.not.fs%cfg%yper.and.fs%cfg%jproc.eq.fs%cfg%npy) div(:,fs%cfg%jmaxo,:)=div(:,fs%cfg%jmaxo-1,:)
      if (.not.fs%cfg%zper.and.fs%cfg%kproc.eq.fs%cfg%npz) div(:,:,fs%cfg%kmaxo)=div(:,:,fs%cfg%kmaxo-1)
    end subroutine get_div
-
-
-   !> Overwrite conserved variables using volume-of-solid IBM
-   subroutine apply_ibm()
-     implicit none
-     integer :: i,j,k,ii,jj,kk
-     real(WP) :: sum_VF,sum_VFQ1,sum_VFQ2
-     real(WP), dimension(:,:,:), allocatable :: Q1old,Q2old
-     allocate(Q1old(fs%cfg%imino_:fs%cfg%imaxo_,fs%cfg%jmino_:fs%cfg%jmaxo_,fs%cfg%kmino_:fs%cfg%kmaxo_)); Q1old=fs%Q(:,:,:,1)
-     allocate(Q2old(fs%cfg%imino_:fs%cfg%imaxo_,fs%cfg%jmino_:fs%cfg%jmaxo_,fs%cfg%kmino_:fs%cfg%kmaxo_)); Q2old=fs%Q(:,:,:,2)
-     do k=cfg%kmin_,cfg%kmax_
-        do j=cfg%jmin_,cfg%jmax_
-           do i=cfg%imin_,cfg%imax_
-              if (ls%VF(i,j,k).eq.0.0_WP) cycle
-              ! Neumann: VF-weighted neighbor average for Q(1) and Q(2)
-              sum_VF=0.0_WP; sum_VFQ1=0.0_WP; sum_VFQ2=0.0_WP
-              do kk=-1,1; do jj=-1,1; do ii=-1,1
-                 if (ii.eq.0.and.jj.eq.0.and.kk.eq.0) cycle
-                 sum_VF  =sum_VF  +(1.0_WP-ls%VF(i+ii,j+jj,k+kk))
-                 sum_VFQ1=sum_VFQ1+(1.0_WP-ls%VF(i+ii,j+jj,k+kk))*Q1old(i+ii,j+jj,k+kk)
-                 sum_VFQ2=sum_VFQ2+(1.0_WP-ls%VF(i+ii,j+jj,k+kk))*Q2old(i+ii,j+jj,k+kk)
-              end do; end do; end do
-              if (sum_VF.gt.0.0_WP) then
-                 fs%Q(i,j,k,1)=(1.0_WP-ls%VF(i,j,k))*fs%Q(i,j,k,1)+ls%VF(i,j,k)*sum_VFQ1/sum_VF
-                 fs%Q(i,j,k,2)=(1.0_WP-ls%VF(i,j,k))*fs%Q(i,j,k,2)+ls%VF(i,j,k)*sum_VFQ2/sum_VF
-              end if
-              ! No-slip now that density is determined
-              fs%Q(i,j,k,3)=(1.0_WP-0.5_WP*(ls%VF(i-1,j,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,3)+0.5_WP*(fs%Q(i-1,j,k,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFU(i-1,j,k)+ls%VFU(i,j,k))
-              fs%Q(i,j,k,4)=(1.0_WP-0.5_WP*(ls%VF(i,j-1,k)+ls%VF(i,j,k)))*fs%Q(i,j,k,4)+0.5_WP*(fs%Q(i,j-1,k,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFV(i,j-1,k)+ls%VFV(i,j,k))
-              fs%Q(i,j,k,5)=(1.0_WP-0.5_WP*(ls%VF(i,j,k-1)+ls%VF(i,j,k)))*fs%Q(i,j,k,5)+0.5_WP*(fs%Q(i,j,k-1,1)+fs%Q(i,j,k,1))*0.5_WP*(ls%VFW(i,j,k-1)+ls%VFW(i,j,k))
-           end do
-        end do
-     end do
-     ! Communicate
-     call fs%cfg%sync(fs%Q(:,:,:,1))
-     call fs%cfg%sync(fs%Q(:,:,:,2))
-     call fs%cfg%sync(fs%Q(:,:,:,3))
-     call fs%cfg%sync(fs%Q(:,:,:,4))
-     call fs%cfg%sync(fs%Q(:,:,:,5))
-     ! Rebuild primitive variables
-     call fs%get_primitive()
-   end subroutine apply_ibm
 
 
    !> Apply boundary conditions
@@ -292,6 +248,7 @@ module simulation
       ! Allocate work arrays
       allocate_work_arrays: block
         allocate(dQdt  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:fs%nQ,1:4))
+        allocate(srcQ  (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_,1:fs%nQ))
         allocate(Ui    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
         allocate(Vi    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
         allocate(Wi    (cfg%imino_:cfg%imaxo_,cfg%jmino_:cfg%jmaxo_,cfg%kmino_:cfg%kmaxo_))
@@ -370,6 +327,7 @@ module simulation
          real(WP) :: dx,mu,kk,max_stretch,Lx,Ly,Lz
          real(WP) :: xmin,xmax,ymin,ymax,zmin,zmax
          integer :: np,nt
+         logical :: useSTL
          type triangle_type
             real(WP), dimension(3) :: norm
             real(WP), dimension(3) :: v1
@@ -386,55 +344,151 @@ module simulation
          call param_read('Poisson Ratio',ls%poisson_ratio)
          call param_read('Solid density',ls%rho)
          call param_read('Critical Energy Release Rate',ls%crit_energy)
-
-         ! Maximum timestep size used for particles
-         call param_read('Particle timestep size',ls_dt_max,default=huge(1.0_WP))
-         ls_dt=min(ls_dt_max,time%dtmax)
          
          ! Discretization
-         ls%delta=fs%cfg%min_meshsize
+         call param_read('Solid dx',dx)
+         ls%dV=dx**3
+         ls%delta=3.0_WP*dx
 
          ! Output some info on stretch
          mu=ls%elastic_modulus/(2.0_WP+2.0_WP*ls%poisson_ratio)
          kk=ls%elastic_modulus/(3.0_WP-6.0_WP*ls%poisson_ratio)
          max_stretch=sqrt(ls%crit_energy/((3.0_WP*mu+(kk-5.0_WP*mu/3.0_WP)*0.75_WP**4)*ls%delta))
-         
+
          ! Only root process initializes solid particles
          if (ls%cfg%amRoot) then
             ! Read the STL file and get domain extents and levelset
-            read_bin: block
+            read_stl: block
               use messager, only: die
-              integer :: p,iunit,ierr
-              character(len=80) :: partfile
-              call param_read('Particle file',partfile)
-              open(newunit=iunit,file=trim(partfile),access="stream",form="unformatted",action="read",status="old",iostat=ierr)
-              if(ierr.ne.0) call die('[read_stl] Could not open file: '//trim(partfile))
-              read(iunit) np
-              call ls%resize(np)
-              do p=1,np
-                 read(iunit) ls%p(p)%pos(1), ls%p(p)%pos(2), ls%p(p)%pos(3), ls%p(p)%vol
-                 ! Set object id and velocity
-                 ls%p(p)%id=-2
-                 ls%p(p)%vel=0.0_WP
-                 ! Zero out force
-                 ls%p(p)%Abond=0.0_WP
-                 ls%p(p)%Afluid=0.0_WP
-                 ! Locate the particle on the mesh
-                 ls%p(p)%ind=ls%cfg%get_ijk_global(ls%p(p)%pos,[ls%cfg%imin,ls%cfg%jmin,ls%cfg%kmin])
-                 ! Assign a unique integer to particle
-                 ls%p(p)%i=p
-                 ! Activate the particle
-                 ls%p(p)%flag=0
-              end do
-              close(iunit)
-            end block read_bin
-         end if
-      
+              use mathtools, only: normalize
+              integer :: i,iunit,ierr
+              real(WP), parameter :: scaling=1.0_WP
+              real(SP) :: rbuf
+              character(len=80) :: stlfile,cbuf
+              character(len= 2) :: padding
+              ! Open the file
+              useSTL=param_exists('STL file')
+              if (useSTL) then
+                 call param_read('STL file',stlfile)
+                 open(newunit=iunit,file=trim(stlfile),status="old",action="read",access="stream",iostat=ierr)
+                 if (ierr.ne.0) call die('[read_stl] Could not open file: '//trim(stlfile))
+                 ! Read the header
+                 read(iunit) cbuf
+                 read(iunit) nt
+                 ! Read the triangle data and scale to meters
+                 allocate(t(nt))
+                 do i=1,nt
+                    read(iunit) rbuf; t(i)%norm(1)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%norm(2)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%norm(3)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v1(1)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v1(2)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v1(3)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v2(1)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v2(2)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v2(3)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v3(1)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v3(2)=real(rbuf,WP)
+                    read(iunit) rbuf; t(i)%v3(3)=real(rbuf,WP)
+                    read(iunit) padding
+                 end do
+                 ! Close the file
+                 close(iunit)
+                 ! Scale
+                 do i=1,nt
+                    t(i)%v1=t(i)%v1*scaling
+                    t(i)%v2=t(i)%v2*scaling
+                    t(i)%v3=t(i)%v3*scaling
+                    t(i)%norm=normalize(t(i)%norm*scaling)
+                 end do
+                 ! Get extents
+                 xmin=minval(t(:)%v1(1)); xmin=min(xmin,minval(t(:)%v2(1))); xmin=min(xmin,minval(t(:)%v3(1)))
+                 xmax=maxval(t(:)%v1(1)); xmax=max(xmin,maxval(t(:)%v2(1))); xmax=max(xmax,maxval(t(:)%v3(1)))
+                 ymin=minval(t(:)%v1(2)); ymin=min(ymin,minval(t(:)%v2(2))); ymin=min(ymin,minval(t(:)%v3(2)))
+                 ymax=maxval(t(:)%v1(2)); ymax=max(ymin,maxval(t(:)%v2(2))); ymax=max(ymax,maxval(t(:)%v3(2)))
+                 zmin=minval(t(:)%v1(3)); zmin=min(zmin,minval(t(:)%v2(3))); zmin=min(zmin,minval(t(:)%v3(3)))
+                 zmax=maxval(t(:)%v1(3)); zmax=max(zmin,maxval(t(:)%v2(3))); zmax=max(zmax,maxval(t(:)%v3(3)))
+                 Lx=xmax-xmin; Ly=ymax-ymin; Lz=zmax-zmin
+                 print *, Lx,Ly,Lz,2.0_WP*Rcyl
+              else
+                 nt=0
+                 Lx=2.0_WP*Rcyl
+                 Ly=2.0_WP*Rcyl
+                 Lz=2.0_WP*Rcyl
+              end if
+            end block read_stl
+            
+            ! First object =====================
+            object: block
+               integer :: p,i,j,k,nx,ny,nz,np_
+               real(WP) :: x,y,z,A,B,C,S
+               real(WP), dimension(:,:), allocatable :: pos
+               ! Create simple rectilinear grid, remove particles outside Rcyl
+               nx=int(Lx/dx)
+               ny=int(Ly/dx)
+               nz=int(Lz/dx)
+               np=nx*ny*nz+nt
+               allocate(pos(3,np))
+               np_=0
+               do p=1,np
+                  if (p.le.nt) then
+                     np_=np_+1
+                     ! Give it a position on surface using STL info
+                     pos(1,np_)=(t(np_)%V1(1)+t(np_)%V2(1)+t(np_)%V3(1))/3.0_WP
+                     pos(2,np_)=(t(np_)%V1(2)+t(np_)%V2(2)+t(np_)%V3(2))/3.0_WP
+                     pos(3,np_)=(t(np_)%V1(3)+t(np_)%V2(3)+t(np_)%V3(3))/3.0_WP
+                  else
+                     ! Give temporary position
+                     i = (p-nt-1)/(ny*nz)
+                     j = (p-nt-1-ny*nz*i)/nz
+                     k = p-nt-1-ny*nz*i-nz*j
+                     x = -Rcyl+(real(i,WP)+0.5_WP)*dx
+                     y = -Rcyl+(real(j,WP)+0.5_WP)*dx
+                     z = max(-Rcyl,ls%cfg%z(ls%cfg%kmin))+(real(k,WP)+0.5_WP)*dx
+                     if (ls%cfg%nz.eq.1) z = 0.0_WP
+                     if (sqrt(x**2+y**2+z**2).lt.Rcyl) then
+                        np_=np_+1
+                        pos(1,np_) = x
+                        pos(2,np_) = y
+                        pos(3,np_) = z
+                     end if
+                  end if
+               end do
+               np=np_
+               call ls%resize(np)
+               do p=1,np
+                  ! Set position
+                  ls%p(p)%pos=pos(:,p)
+                  ! Set object id and velocity
+                  ls%p(p)%id=-2
+                  ls%p(p)%vel=0.0_WP
+                  ! Zero out force
+                  ls%p(p)%Abond=0.0_WP
+                  ! Zero out normal
+                  ls%p(p)%normal=0.0_WP
+                  ! Locate the particle on the mesh
+                  ls%p(p)%ind=ls%cfg%get_ijk_global(ls%p(p)%pos,[ls%cfg%imin,ls%cfg%jmin,ls%cfg%kmin])
+                  ! Assign a unique integer to particle
+                  ls%p(p)%i=p
+                  ! Activate the particle
+                  if (p.le.nt) then
+                     ls%p(p)%flag=2
+                  else
+                     ls%p(p)%flag=0
+                  end if
+               end do
+               deallocate(pos)
+             end block object
+          end if
+         
          ! Communicate particles
-         call ls%sync()
+          call ls%sync()
 
-         ! Get initial volume fraction
-         call ls%update_VF()
+          ! Update volume
+          ls%dV=4.0_WP/3.0_WP*(3.14159)*Rcyl**3/real(ls%np,WP)
+
+          ! Get initial volume fraction
+          call ls%update_VF()
          
          ! Initalize bonds
          call ls%bond_init()
@@ -452,12 +506,13 @@ module simulation
       create_pmesh: block
          use lss_class, only: max_bond
          integer :: i,n,nbond
-         pmesh=partmesh(nvar=3,nvec=2,name='solid')
+         pmesh=partmesh(nvar=3,nvec=3,name='solid')
          pmesh%varname(1)='failfrac'
          pmesh%varname(2)='dilatation'
          pmesh%varname(3)='flag'
          pmesh%vecname(1)='velocity'
          pmesh%vecname(2)='bond_force'
+         pmesh%vecname(3)='normals'
          call ls%update_partmesh(pmesh)
          do i=1,ls%np_
             pmesh%var(1,i)=0.0_WP
@@ -474,6 +529,7 @@ module simulation
             pmesh%var(3,i)  =ls%p(i)%flag
             pmesh%vec(:,1,i)=ls%p(i)%vel
             pmesh%vec(:,2,i)=ls%p(i)%Abond
+            pmesh%vec(:,3,i)=ls%p(i)%normal
          end do
       end block create_pmesh
 
@@ -520,6 +576,7 @@ module simulation
          ! Add variables to output
          call ens_out%add_particle('particles',pmesh)
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
+         call ens_out%add_vector('norm',ls%norm(1,:,:,:),ls%norm(2,:,:,:),ls%norm(3,:,:,:))
          call ens_out%add_scalar('P',fs%P)
          call ens_out%add_scalar('T',fs%T)
          call ens_out%add_scalar('Mach',Ma)
@@ -587,7 +644,7 @@ module simulation
         sfile=monitor(ls%cfg%amRoot,'solid')
         call sfile%add_column(time%n,'Timestep number')
         call sfile%add_column(time%t,'Time')
-        call sfile%add_column(ls_dt,'Particle dt')
+        call sfile%add_column(time%dt,'Timestep size')
         call sfile%add_column(time%cfl,'Maximum CFL')
         call sfile%add_column(ls%np,'Particle number')
         call sfile%add_column(ls%VFmax,'VFmax')
@@ -620,79 +677,111 @@ module simulation
          call time%adjust_dt()
          call time%increment()
 
-         ! Advance solid solver
-         solid: block
-           real(WP) :: dt_done,mydt
-           ! Compute divergence of fluid stress
-           call fs%get_div_stress(divx=dQdt(:,:,:,1,1),divy=dQdt(:,:,:,2,1),divz=dQdt(:,:,:,3,1))
-           ! Sub-iteratore
-           call ls%get_cfl(ls_dt,cfl=cfl)
-           if (cfl.gt.0.0_WP) ls_dt=min(ls_dt*time%cflmax/cfl,ls_dt_max)
-           dt_done=0.0_WP
-           do while (dt_done.lt.time%dtmid)
-              ! Decide the timestep size
-              mydt=min(ls_dt,time%dtmid-dt_done)
-              ! Advance particles
-              call ls%advance(dt      =mydt,           &
-              &               stress_x=dQdt(:,:,:,1,1),&
-              &               stress_y=dQdt(:,:,:,2,1),&
-              &               stress_z=dQdt(:,:,:,3,1))
-              ! Increment
-              dt_done=dt_done+mydt
-           end do
-         end block solid
-
          ! Remember conserved variables
          fs%Qold=fs%Q
 
          ! Prepare SGS viscosity models
          call prepare_viscosities()
 
-         ! ! First RK step ====================================================================================
-         ! ! Get non-SL RHS and increment
-         ! call fs%rhs(dQdt(:,:,:,:,1))
-         ! fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,1)
-         ! ! Apply IBM
-         ! call apply_ibm()
-
-         ! ! Second RK step ===================================================================================
-         ! ! Get non-SL RHS and increment at midpoint
-         ! call fs%rhs(dQdt(:,:,:,:,2))
-         ! fs%Q=fs%Qold+time%dt*dQdt(:,:,:,:,2)
-         ! ! Apply IBM
-         ! call apply_ibm()
-
          ! First RK step ====================================================================================
+         ! Advance particles
+         call ls%substep_rk4(stage =1,&
+         &                   dt    =time%dt,&
+         &                   gamma =Gamma,&
+         &                   Pinf  =Pinf,&
+         &                   U     =fs%U,&
+         &                   V     =fs%V,&
+         &                   W     =fs%W,&
+         &                   P     =fs%P,&
+         &                   RHO   =fs%Q(:,:,:,1),&
+         &                   srcRHO=srcQ(:,:,:,1),&
+         &                   srcI  =srcQ(:,:,:,2),&
+         &                   srcU  =srcQ(:,:,:,3),&
+         &                   srcV  =srcQ(:,:,:,4),&
+         &                   srcW  =srcQ(:,:,:,5))
          ! Get non-SL RHS and increment
          call fs%rhs(dQdt(:,:,:,:,1))
+         ! IBM source
+         dQdt(:,:,:,:,1)=dQdt(:,:,:,:,1)+srcQ
          ! Advance
          fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,1)
-         ! Apply IBM
-         call apply_ibm()
+         ! Recompute primitive variables
+         call fs%get_primitive()
 
          ! Second RK step ===================================================================================
+         ! Advance particles
+         call ls%substep_rk4(stage =2,&
+         &                   dt    =time%dt,&
+         &                   gamma =Gamma,&
+         &                   Pinf  =Pinf,&
+         &                   U     =fs%U,&
+         &                   V     =fs%V,&
+         &                   W     =fs%W,&
+         &                   P     =fs%P,&
+         &                   RHO   =fs%Q(:,:,:,1),&
+         &                   srcRHO=srcQ(:,:,:,1),&
+         &                   srcI  =srcQ(:,:,:,2),&
+         &                   srcU  =srcQ(:,:,:,3),&
+         &                   srcV  =srcQ(:,:,:,4),&
+         &                   srcW  =srcQ(:,:,:,5))
          ! Get non-SL RHS and increment
          call fs%rhs(dQdt(:,:,:,:,2))
+         ! IBM source
+         dQdt(:,:,:,:,2)=dQdt(:,:,:,:,2)+srcQ
          ! Advance
          fs%Q=fs%Qold+0.5_WP*time%dt*dQdt(:,:,:,:,2)
-         ! Apply IBM
-         call apply_ibm()
+         ! Recompute primitive variables
+         call fs%get_primitive()
 
          ! Third RK step ====================================================================================
+         ! Advance particles
+         call ls%substep_rk4(stage =3,&
+         &                   dt    =time%dt,&
+         &                   gamma =Gamma,&
+         &                   Pinf  =Pinf,&
+         &                   U     =fs%U,&
+         &                   V     =fs%V,&
+         &                   W     =fs%W,&
+         &                   P     =fs%P,&
+         &                   RHO   =fs%Q(:,:,:,1),&
+         &                   srcRHO=srcQ(:,:,:,1),&
+         &                   srcI  =srcQ(:,:,:,2),&
+         &                   srcU  =srcQ(:,:,:,3),&
+         &                   srcV  =srcQ(:,:,:,4),&
+         &                   srcW  =srcQ(:,:,:,5))
          ! Get non-SL RHS and increment
          call fs%rhs(dQdt=dQdt(:,:,:,:,3))
+         ! IBM source
+         dQdt(:,:,:,:,3)=dQdt(:,:,:,:,3)+srcQ
          ! Advance
          fs%Q=fs%Qold+1.0_WP*time%dt*dQdt(:,:,:,:,3)
-         ! Apply IBM
-         call apply_ibm()
+         ! Recompute primitive variables
+         call fs%get_primitive()
 
          ! Fourth RK step ===================================================================================
+         ! Advance particles
+         call ls%substep_rk4(stage =4,&
+         &                   dt    =time%dt,&
+         &                   gamma =Gamma,&
+         &                   Pinf  =Pinf,&
+         &                   U     =fs%U,&
+         &                   V     =fs%V,&
+         &                   W     =fs%W,&
+         &                   P     =fs%P,&
+         &                   RHO   =fs%Q(:,:,:,1),&
+         &                   srcRHO=srcQ(:,:,:,1),&
+         &                   srcI  =srcQ(:,:,:,2),&
+         &                   srcU  =srcQ(:,:,:,3),&
+         &                   srcV  =srcQ(:,:,:,4),&
+         &                   srcW  =srcQ(:,:,:,5))
          ! Get non-SL RHS and increment
          call fs%rhs(dQdt(:,:,:,:,4))
+         ! IBM source
+         dQdt(:,:,:,:,4)=dQdt(:,:,:,:,4)+srcQ
          ! Advance
          fs%Q=fs%Qold+time%dt/6.0_WP*(dQdt(:,:,:,:,1)+2.0_WP*dQdt(:,:,:,:,2)+2.0_WP*dQdt(:,:,:,:,3)+dQdt(:,:,:,:,4))
-         ! Apply IBM
-         call apply_ibm()
+         ! Recompute primitive variables
+         call fs%get_primitive()
 
          ! Apply boundary conditions
          call apply_bconds()
@@ -734,6 +823,8 @@ module simulation
                  pmesh%var(3,i)  =ls%p(i)%flag
                  pmesh%vec(:,1,i)=ls%p(i)%vel
                  pmesh%vec(:,2,i)=ls%p(i)%Abond
+                 !print*, ls%p(i)%normal
+                 pmesh%vec(:,3,i)=ls%p(i)%normal
               end do
             end block update_pmesh
             call ens_out%write_data(time%t)
@@ -755,7 +846,7 @@ module simulation
       ! timetracker
       
       ! Deallocate work arrays
-      deallocate(dQdt,Ui,Vi,Wi,Ma,beta,visc,visc_t,div)
+      deallocate(dQdt,Ui,Vi,Wi,Ma,beta,visc,visc_t,div,srcQ)
       
    end subroutine simulation_final
    

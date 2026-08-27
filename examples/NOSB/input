@@ -1,0 +1,30 @@
+# Parallelization
+Partition :	9 1 1
+
+
+# Beam Shape
+Lz :	0.01
+Ly :	0.01
+Lx :	.1
+R :     0.000
+Particle file: element_data.bin
+
+# Solid properties
+Subdivisions : 33
+Elastic Modulus : 200e9
+Poisson Ratio : 0.30
+Solid density : 7850
+Critical Energy Release Rate : 100000
+Horizon Ratio : 3.015
+N Across : 9
+Mean Particle Spacing : 0.00125
+Solid Load : 1e3
+Solid Damping Constant : 0.015
+
+# Time integration
+Max timestep size : 3.0e-7
+Max cfl number :    1.3
+Max time :          10
+
+# Ensight output
+Ensight output period : 1e-5

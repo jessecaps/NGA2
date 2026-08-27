@@ -35,7 +35,7 @@ contains
          
          ! Create simple rectilinear grid
          do i=1,nx+1
-            x(i)=real(i-1,WP)/real(nx,WP)*Lx-0.5_WP*Lx
+            x(i)=real(i-1,WP)/real(nx,WP)*Lx-0.25_WP*Lx
          end do
          do j=1,ny+1
             y(j)=real(j-1,WP)/real(ny,WP)*Ly-0.5_WP*Ly
@@ -45,7 +45,7 @@ contains
          end do
          
          ! General serial grid object (no=3 needed to support ghost/image point interpolation/extrapolation)
-         grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.true.,zper=.true.,name='box')
+         grid=sgrid(coord=cartesian,no=3,x=x,y=y,z=z,xper=.false.,yper=.true.,zper=.true.,name='box')
          
       end block create_grid
       

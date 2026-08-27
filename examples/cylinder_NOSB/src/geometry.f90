@@ -35,7 +35,7 @@ contains
          
          ! Create simple rectilinear grid
          do i=1,nx+1
-            x(i)=real(i-1,WP)/real(nx,WP)*Lx-0.5_WP*Lx
+            x(i)=real(i-1,WP)/real(nx,WP)*Lx-0.25_WP*Lx
          end do
          do j=1,ny+1
             y(j)=real(j-1,WP)/real(ny,WP)*Ly-0.5_WP*Ly
@@ -44,8 +44,8 @@ contains
             z(k)=real(k-1,WP)/real(nz,WP)*Lz-0.5_WP*Lz
          end do
          
-         ! General serial grid object (no=3 needed to support ghost/image point interpolation/extrapolation)
-         grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.true.,zper=.true.,name='box')
+         ! General serial grid object
+         grid=sgrid(coord=cartesian,no=2,x=x,y=y,z=z,xper=.false.,yper=.true.,zper=.true.,name='channel')
          
       end block create_grid
       
@@ -60,12 +60,10 @@ contains
          cfg=config(grp=group,decomp=partition,grid=grid)
       end block create_cfg
       
-      
-      ! Create walls for this config
-      create_walls: block
-        cfg%VF=1.0_WP
-      end block create_walls
-      
+      ! Create masks for this config
+       create_walls: block
+          cfg%VF=1.0_WP
+       end block create_walls
       
    end subroutine geometry_init
    

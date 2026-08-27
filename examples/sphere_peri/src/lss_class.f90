@@ -4,7 +4,6 @@ module lss_class
    use precision,      only: WP
    use string,         only: str_medium
    use config_class,   only: config
-   use ddadi_class,    only: ddadi
    use mpi_f08,        only: MPI_Datatype,MPI_INTEGER8,MPI_INTEGER,MPI_DOUBLE_PRECISION
    implicit none
    private
@@ -32,23 +31,23 @@ module lss_class
       !> MPI_DOUBLE_PRECISION data
       real(WP) :: mw                         !< Weighted volume
       real(WP) :: dil                        !< Element dilatation
-      real(WP) :: vol                        !< Particle volume
       real(WP), dimension(max_bond) :: dbond !< Length of initial bonds
       real(WP), dimension(3) :: pos          !< Particle center coordinates
       real(WP), dimension(3) :: vel          !< Velocity of particle
       real(WP), dimension(3) :: Abond        !< Bond acceleration for particle
-      real(WP), dimension(3) :: Afluid       !< Fluid acceleration for particle
+      real(WP), dimension(3) :: drag         !< Fluid force from IBM
+      real(WP), dimension(3) :: normal       !< Normal direction for surface particle
       !> MPI_INTEGER data
       integer :: id                          !< ID the object is associated with
       integer :: i                           !< Unique index of particle (assumed >0)
       integer :: nbond                       !< Number of initial bonds
       integer, dimension(max_bond) :: ibond  !< Indices of initially bonded particles (0 values ignored)
       integer , dimension(3) :: ind          !< Index of cell containing particle center
-      integer :: flag                        !< Control parameter (0=normal, 1=done->will be removed)
+      integer :: flag                        !< Control parameter (0=normal, 1=done->will be removed, 2=surface particle)
    end type part
    !> Number of blocks, block length, and block types in a particle
    integer, parameter                         :: part_nblock=2
-   integer           , dimension(part_nblock) :: part_lblock=[15+max_bond,7+max_bond]
+   integer           , dimension(part_nblock) :: part_lblock=[17+max_bond,7+max_bond]
    type(MPI_Datatype), dimension(part_nblock) :: part_tblock=[MPI_DOUBLE_PRECISION,MPI_INTEGER]
    !> MPI_PART derived datatype and size
    type(MPI_Datatype) :: MPI_PART
@@ -60,8 +59,6 @@ module lss_class
    
       ! This config is used for parallelization and for calculating bond/collision forces
       class(config), pointer :: cfg
-
-      type(ddadi) :: implicit                             !< Implicit solver for filtering
       
       ! This is the name of the solver
       character(len=str_medium) :: name='UNNAMED_LSS'
@@ -71,10 +68,10 @@ module lss_class
       real(WP) :: poisson_ratio                           !< Poisson's ratio of the material
       real(WP) :: rho                                     !< Density of the material
       real(WP) :: crit_energy                             !< Critical energy release
+      real(WP) :: dV                                      !< Element volume
       
       ! Bonding parameters
       real(WP) :: delta                                   !< Bonding horizon (distance)
-      real(WP) :: min_dist                                !< Minimum bonding distance
       integer :: nb                                       !< Cell-based horizon 
       
       ! Global and local particle data
@@ -82,6 +79,8 @@ module lss_class
       integer :: np_                                      !< Local number of particles
       integer, dimension(:), allocatable :: np_proc       !< Number of particles on each processor
       type(part), dimension(:), allocatable :: p          !< Array of particles of type part
+      type(part), dimension(:), allocatable :: pold       !< Array of temporary particles for RK4
+      type(part), dimension(:), allocatable :: pbuf       !< Array of temporary particles for RK4
       
       ! Overlap particle (i.e., ghost) data
       integer :: ng_                                      !< Local number of ghosts
@@ -90,14 +89,13 @@ module lss_class
       ! Gravitational acceleration
       real(WP), dimension(3) :: gravity=0.0_WP
       
-      ! Solid volume fraction and momentum
+      ! Volume fraction and normal vector associated with IBM projection
       real(WP), dimension(:,:,:), allocatable :: VF       !< Volume fraction, cell-centered
-      real(WP), dimension(:,:,:), allocatable :: VFU      !< Solid velocity, U-face
-      real(WP), dimension(:,:,:), allocatable :: VFV      !< Solid velocity, V-face
-      real(WP), dimension(:,:,:), allocatable :: VFW      !< Solid velocity, W-face
+      real(WP), dimension(:,:,:,:), allocatable :: norm   !< Normal vector
+      integer, dimension(:,:,:), allocatable :: phase     !< 1 if particles present in cell, 0 otherwise
       
       ! CFL numbers
-      real(WP) :: CFLp_x,CFLp_y,CFLp_z,CFLp_a
+      real(WP) :: CFLp_x,CFLp_y,CFLp_z
       
       ! Number of substeps for time integrator
       real(WP) :: nstep=1
@@ -109,16 +107,12 @@ module lss_class
       real(WP) :: VFmax                              !< Volume fraction info
       real(WP), dimension(3) :: ibmForce             !< Total force due to IBM
       integer  :: np_out                             !< Number of particles leaving the domain
-
-      ! Filtering operation
-      real(WP) :: filter_width                       !< Characteristic filter width
-      real(WP), dimension(:,:,:,:), allocatable :: div_x,div_y,div_z    !< Divergence operator
-      real(WP), dimension(:,:,:,:), allocatable :: grd_x,grd_y,grd_z    !< Gradient operator
       
    contains
       procedure :: bond_init                         !< Setup initial interparticle bonds
       procedure :: get_bond_force                    !< Compute interparticle bond force
-      procedure :: advance                           !< Step forward the particle ODEs
+      procedure :: substep_rk4                       !< RK4 integration of particle ODEs
+      procedure :: get_source                        !< Compute IBM source terms
       procedure :: get_cfl                           !< Calculate maximum CFL
       procedure :: get_max                           !< Extract various monitoring data
       procedure :: update_partmesh                   !< Update a partmesh object using current particles
@@ -130,7 +124,10 @@ module lss_class
       procedure :: write                             !< Parallel write particles to file
       procedure :: read                              !< Parallel read particles from file
       procedure :: update_VF                         !< Compute volume fraction
-      procedure :: filter                            !< Apply volume filtering to field
+      procedure :: calculate_normal                  !< Compute normal vector from volume fraction
+      procedure :: get_delta                         !< Compute regularized delta function
+      procedure :: interpolate                       !< Interpolation routine from mesh=>marker
+      procedure :: extrapolate                       !< Extrapolation routine from marker=>mesh
    end type lss
    
    
@@ -174,104 +171,20 @@ contains
       ! Set default bonding horizon based on underlying mesh
       self%delta=self%cfg%min_meshsize
       self%nb=1
-      self%min_dist=huge(1.0_WP)
       
       ! Allocate variables
       allocate(self%np_proc(1:self%cfg%nproc)); self%np_proc=0
       self%np_=0; self%np=0
       call self%resize(0)
-
+      
       ! Initialize MPI derived datatype for a particle
       call prepare_mpi_part()
-
-      ! Allocate VF array on cfg mesh
-      allocate(self%VF(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VF=0.0_WP
-      allocate(self%VFU(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFU=0.0_WP
-      allocate(self%VFV(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFV=0.0_WP
-      allocate(self%VFW(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VFW=0.0_WP
-
-      ! Allocate finite volume divergence operators
-      allocate(self%div_x(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      allocate(self%div_y(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      allocate(self%div_z(0:+1,self%cfg%imin_:self%cfg%imax_,self%cfg%jmin_:self%cfg%jmax_,self%cfg%kmin_:self%cfg%kmax_)) !< Cell-centered
-      ! Create divergence operator to cell center [xm,ym,zm]
-      do k=self%cfg%kmin_,self%cfg%kmax_
-         do j=self%cfg%jmin_,self%cfg%jmax_
-            do i=self%cfg%imin_,self%cfg%imax_
-               self%div_x(:,i,j,k)=self%cfg%dxi(i)*[-1.0_WP,+1.0_WP] !< Divergence from [x ,ym,zm]
-               self%div_y(:,i,j,k)=self%cfg%dyi(j)*[-1.0_WP,+1.0_WP] !< Divergence from [xm,y ,zm]
-               self%div_z(:,i,j,k)=self%cfg%dzi(k)*[-1.0_WP,+1.0_WP] !< Divergence from [xm,ym,z ]
-            end do
-         end do
-      end do
-
-      ! Allocate finite difference velocity gradient operators
-      allocate(self%grd_x(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< X-face-centered
-      allocate(self%grd_y(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< Y-face-centered
-      allocate(self%grd_z(-1:0,self%cfg%imin_:self%cfg%imax_+1,self%cfg%jmin_:self%cfg%jmax_+1,self%cfg%kmin_:self%cfg%kmax_+1)) !< Z-face-centered
-      ! Create gradient coefficients to cell faces
-      do k=self%cfg%kmin_,self%cfg%kmax_+1
-         do j=self%cfg%jmin_,self%cfg%jmax_+1
-            do i=self%cfg%imin_,self%cfg%imax_+1
-               self%grd_x(:,i,j,k)=self%cfg%dxmi(i)*[-1.0_WP,+1.0_WP] !< Gradient in x from [xm,ym,zm] to [x,ym,zm]
-               self%grd_y(:,i,j,k)=self%cfg%dymi(j)*[-1.0_WP,+1.0_WP] !< Gradient in y from [xm,ym,zm] to [xm,y,zm]
-               self%grd_z(:,i,j,k)=self%cfg%dzmi(k)*[-1.0_WP,+1.0_WP] !< Gradient in z from [xm,ym,zm] to [xm,ym,z]
-            end do
-         end do
-      end do
-
-      ! Loop over the domain and zero divergence in walls
-      do k=self%cfg%kmin_,self%cfg%kmax_
-         do j=self%cfg%jmin_,self%cfg%jmax_
-            do i=self%cfg%imin_,self%cfg%imax_
-               if (self%cfg%VF(i,j,k).eq.0.0_WP) then
-                  self%div_x(:,i,j,k)=0.0_WP
-                  self%div_y(:,i,j,k)=0.0_WP
-                  self%div_z(:,i,j,k)=0.0_WP
-               end if
-            end do
-         end do
-      end do
       
-      ! Zero out gradient to wall faces
-      do k=self%cfg%kmin_,self%cfg%kmax_+1
-         do j=self%cfg%jmin_,self%cfg%jmax_+1
-            do i=self%cfg%imin_,self%cfg%imax_+1
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i-1,j,k).eq.0.0_WP) self%grd_x(:,i,j,k)=0.0_WP
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i,j-1,k).eq.0.0_WP) self%grd_y(:,i,j,k)=0.0_WP
-               if (self%cfg%VF(i,j,k).eq.0.0_WP.or.self%cfg%VF(i,j,k-1).eq.0.0_WP) self%grd_z(:,i,j,k)=0.0_WP
-            end do
-         end do
-      end do
-
-      ! Adjust metrics to account for lower dimensionality
-      if (self%cfg%nx.eq.1) then
-         self%div_x=0.0_WP
-         self%grd_x=0.0_WP
-      end if
-      if (self%cfg%ny.eq.1) then
-         self%div_y=0.0_WP
-         self%grd_y=0.0_WP
-      end if
-      if (self%cfg%nz.eq.1) then
-         self%div_z=0.0_WP
-         self%grd_z=0.0_WP
-      end if
-
-      ! Create implicit solver object for filtering
-      self%implicit=ddadi(cfg=self%cfg,name='Filter',nst=7)
-      self%implicit%stc(1,:)=[ 0, 0, 0]
-      self%implicit%stc(2,:)=[+1, 0, 0]
-      self%implicit%stc(3,:)=[-1, 0, 0]
-      self%implicit%stc(4,:)=[ 0,+1, 0]
-      self%implicit%stc(5,:)=[ 0,-1, 0]
-      self%implicit%stc(6,:)=[ 0, 0,+1]
-      self%implicit%stc(7,:)=[ 0, 0,-1]
-      call self%implicit%init()
-
-      ! Set default filter width
-      self%filter_width=2.0_WP*self%cfg%min_meshsize
-
+      ! Allocate VF and norm arrays on cfg mesh
+      allocate(self%VF(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%VF=0.0_WP
+      allocate(self%norm(1:3,self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%norm=0.0_WP
+      allocate(self%phase(self%cfg%imino_:self%cfg%imaxo_,self%cfg%jmino_:self%cfg%jmaxo_,self%cfg%kmino_:self%cfg%kmaxo_)); self%phase=0
+      
       ! Log/screen output
       logging: block
          use, intrinsic :: iso_fortran_env, only: output_unit
@@ -342,15 +255,15 @@ contains
       
       ! Establish initial bonds
       create_bonds: block
-         use mpi_f08,  only: MPI_ALLREDUCE,MPI_MIN,MPI_IN_PLACE
-         use parallel, only: MPI_REAL_WP
          use mathtools, only: Pi
-         integer :: i,j,k,n1,nn,n2,ierr
+         integer :: i,j,k,n1,nn,n2,nbond_surf
          type(part) :: p1,p2
          real(WP), dimension(3) :: rpos
          real(WP) :: dist
-         ! Reset minimum bond distance
-         this%min_dist=huge(1.0_WP)
+
+         ! Number of bonds associated with surface particle (this could be better)
+         nbond_surf=ceiling(4.0_WP/3.0_WP*Pi*this%delta**3/this%dV*0.6_WP)
+
          ! Loop over particles
          do n1=1,this%np_
             ! Create copy of our particle
@@ -387,9 +300,7 @@ contains
                            p1%ibond(p1%nbond)=p2%i
                            p1%dbond(p1%nbond)=dist
                            ! Increment weighted volume
-                           p1%mw=p1%mw+wgauss(dist,this%delta)*dist**2*p1%vol
-                           ! Determine minimum bond distance
-                           this%min_dist=min(this%min_dist,dist)
+                           p1%mw=p1%mw+wgauss(dist,this%delta)*dist**2*this%dV
                         end if
                      end do
                   end do
@@ -399,9 +310,9 @@ contains
             p1%dil=0.0_WP
             ! Copy back the particle
             this%p(n1)=p1
+            ! Flag surface particles based on nbond
+            if (this%p(n1)%nbond.lt.nbond_surf) this%p(n1)%flag=2
          end do
-         ! Get global minimum
-         call MPI_ALLREDUCE(MPI_IN_PLACE,this%min_dist,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr)
       end block create_bonds
       
       ! Clean up
@@ -417,10 +328,6 @@ contains
       class(lss), intent(inout) :: this
       integer, dimension(:,:,:),   allocatable :: npic    !< Number of particle in cell
       integer, dimension(:,:,:,:), allocatable :: ipic    !< Index of particle in cell
-      logical :: is2D
-
-      ! Need to modify parameters in 2D
-      is2D=this%cfg%nx.eq.1.or.this%cfg%ny.eq.1.or.this%cfg%nz.eq.1
       
       ! Communicate particles in ghost cells
       call this%share()
@@ -472,6 +379,7 @@ contains
          integer :: nb,nbond
          real(WP), dimension(3) :: rpos
          real(WP) :: dist
+         
          ! Loop over particles
          do n1=1,this%np_
             ! Create copy of our particle
@@ -496,12 +404,12 @@ contains
                         do nb=1,max_bond
                            if (p1%ibond(nb).eq.p2%i) then
                               ! Increment weighted volume
-                              p1%mw=p1%mw+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)**2*p2%vol
+                              p1%mw=p1%mw+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)**2*this%dV
                               ! Get current distance
                               rpos=p2%pos-p1%pos
                               dist=sqrt(dot_product(rpos,rpos))
                               ! Increment dilatation
-                              p1%dil=p1%dil+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)*(dist-p1%dbond(nb))*p2%vol
+                              p1%dil=p1%dil+wgauss(p1%dbond(nb),this%delta)*p1%dbond(nb)*(dist-p1%dbond(nb))*this%dV
                            end if
                         end do
                      end do
@@ -509,53 +417,35 @@ contains
                end do
             end do
             ! Rescale dilatation
-            if (p1%mw.gt.epsilon(1.0_WP)) then
-               if (is2D) then
-                  ! 2D plane strain
-                  p1%dil=p1%dil*2.0_WP/p1%mw
-               else
-                  ! 3D
-                  p1%dil=p1%dil*3.0_WP/p1%mw
-               end if
-            else
-               p1%dil=0.0_WP
-            end if
+            p1%dil=p1%dil*3.0_WP/p1%mw
             ! Copy back the particle
             this%p(n1)=p1
          end do
-       end block update_weighted_vol_and_dilatation
+      end block update_weighted_vol_and_dilatation
       
       ! Re-communicate particles in ghost cells to update dil and mw
       call this%share()
       
       ! Update bond force, including collision force
       update_bond_force: block
-         use mpi_f08,  only: MPI_ALLREDUCE,MPI_MIN,MPI_IN_PLACE
-         use parallel, only: MPI_REAL_WP
          use mathtools, only: Pi
-         integer :: i,j,k,n1,nn,n2,ierr
+         integer :: i,j,k,n1,nn,n2
          type(part) :: p1,p2
          real(WP), dimension(3) :: rpos,t12,t21
-         real(WP) :: dist,beta,alpha,ed,t
+         real(WP) :: dist,beta,alpha,ed
          real(WP) :: stretch,max_stretch,mu,kk
          real(WP) :: nc,rc,kc
          integer :: nb,nbond
          logical :: found_bond
+         
          ! Recompute a few physical parameters
          mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
          kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio)
-         if (is2D) then
-            if (this%cfg%nx.eq.1) t=this%cfg%xL
-            if (this%cfg%ny.eq.1) t=this%cfg%yL
-            if (this%cfg%nz.eq.1) t=this%cfg%zL
-            max_stretch=sqrt(this%crit_energy/((6.0_WP*mu/Pi+16.0_WP/(9.0_WP*Pi**2)*(kk-2.0_WP*mu))*this%delta))
-            kc=15.0_WP*48.0_WP*this%elastic_modulus/(Pi*5.0_WP*t*this%delta**3)
-         else
-            max_stretch=sqrt(this%crit_energy/((3.0_WP*mu+(kk-5.0_WP*mu/3.0_WP)*0.75_WP**4)*this%delta))
-            kc=15.0_WP*12.0_WP*this%elastic_modulus/(Pi*this%delta**4)
-         end if
+         max_stretch=sqrt(this%crit_energy/((3.0_WP*mu+(kk-5.0_WP*mu/3.0_WP)*0.75_WP**4)*this%delta))
+         rc=this%dV**(1.0_WP/3.0_WP)
          nc=1.0_WP
-         this%min_dist=huge(1.0_WP)
+         kc=15.0_WP*12.0_WP*this%elastic_modulus/(Pi*this%delta**4)
+         
          ! Loop over particles
          do n1=1,this%np_
             ! Particles marked 0 do not update their forces
@@ -590,67 +480,43 @@ contains
                                  ! Remove the bond and flag as surface particle
                                  p1%ibond(nb)=0
                                  p1%dbond(nb)=0.0_WP
+                                 p1%flag=2
                                  cycle
                               end if
-                              ! Particle 1
-                              if (is2D) then
-                                 ! 2D plane strain
-                                 beta  = 2.0_WP * kk * p1%dil
-                                 alpha = 8.0_WP * mu / p1%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p1%dil / 2.0_WP)
-                              else
-                                 ! 3D
-                                 beta  = 3.0_WP * kk * p1%dil
-                                 alpha = 15.0_WP * mu / p1%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p1%dil / 3.0_WP)
-                              end if
+                              ! Beta1
+                              beta=3.0_WP*kk*p1%dil
+                              ! Alpha1
+                              alpha=15.0_WP*mu/p1%mw
+                              ! Extension1
+                              ed=dist-p1%dbond(nb)*(1.0_WP+p1%dil/3.0_WP)
                               ! Force density 1->2
                               t12=+wgauss(p1%dbond(nb),this%delta)*(beta/p1%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
-                              ! Particle 2
-                              if (is2D) then
-                                 ! 2D plane strain
-                                 beta  = 2.0_WP * kk * p2%dil
-                                 alpha = 8.0_WP * mu / p2%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p2%dil / 2.0_WP)
-                              else
-                                 ! 3D
-                                 beta  = 3.0_WP * kk * p2%dil
-                                 alpha = 15.0_WP * mu / p2%mw
-                                 ed    = dist - p1%dbond(nb) * (1.0_WP + p2%dil / 3.0_WP)
-                              end if
+                              ! Beta2
+                              beta=3.0_WP*kk*p2%dil
+                              ! Alpha2
+                              alpha=15.0_WP*mu/p2%mw
+                              ! Extension2
+                              ed=dist-p1%dbond(nb)*(1.0_WP+p2%dil/3.0_WP)
                               ! Force density 2->1
                               t21=-wgauss(p1%dbond(nb),this%delta)*(beta/p2%mw*p1%dbond(nb)+alpha*ed)*rpos/dist
                               ! Increment bond force
-                              p1%Abond=p1%Abond+(t12-t21)*p1%vol/this%rho
+                              p1%Abond=p1%Abond+(t12-t21)*this%dV/this%rho
                               ! If still here, we have an active bond
                               found_bond=.true.
-                              ! Determine minimum bond distance
-                              this%min_dist=min(this%min_dist,dist)
                               cycle
                            end if
                         end do
                         ! Add collision force now
-                        if (is2D) then
-                           rc=p1%vol**(1.0_WP/2.0_WP)
-                        else
-                           rc=p1%vol**(1.0_WP/3.0_WP)
-                        end if
                         if (.not.found_bond.and.p1%i.ne.p2%i.and.dist.lt.rc) then
-                           p1%Abond=p1%Abond-max(kc*((rc/dist)**nc-1.0_WP),0.0_WP)*(rpos/dist)*p1%vol/this%rho
+                           p1%Abond=p1%Abond-kc*((rc/dist)**nc-1.0_WP)*(rpos/dist)*this%dV/this%rho
                         end if
                      end do
                   end do
                end do
             end do
-            ! Deal with dimensionality
-            if (this%cfg%nx.eq.1) p1%Abond(1)=0.0_WP
-            if (this%cfg%ny.eq.1) p1%Abond(2)=0.0_WP
-            if (this%cfg%nz.eq.1) p1%Abond(3)=0.0_WP
             ! Copy back the particle
             this%p(n1)=p1
          end do
-         ! Get global minimum
-         call MPI_ALLREDUCE(MPI_IN_PLACE,this%min_dist,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr)
       end block update_bond_force
       
       ! Clean up
@@ -660,63 +526,280 @@ contains
    end subroutine get_bond_force
     
 
-   !> Advance the particle equations by a specified time step dt
+   !> Advance the particle equations in a stage of RK4
    !> p%id=-2 => do not solve for position nor velocity
    !> p%id=-1 => do not solve for velocity
    !> p%id= 0 => do not update force
-   subroutine advance(this,dt,stress_x,stress_y,stress_z)
-      use mpi_f08,   only : MPI_SUM,MPI_INTEGER,MPI_IN_PLACE
+   subroutine substep_rk4(this,stage,dt,Gamma,Pinf,U,V,W,P,RHO,srcRHO,srcI,srcU,srcV,srcW)
+      use mpi_f08,   only: MPI_ALLREDUCE,MPI_SUM,MPI_MAX,MPI_INTEGER,MPI_IN_PLACE
+      use parallel,  only: MPI_REAL_WP
       use mathtools, only: Pi
       implicit none
       class(lss), intent(inout) :: this
-      real(WP), intent(inout) :: dt  !< Timestep size over which to advance
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_x  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_y  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: stress_z  !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      integer :: n,ierr
-      real(WP), dimension(3) :: stress
+      integer, intent(in) :: stage     !< RK stage
+      real(WP), intent(inout) :: dt    !< Timestep size over which to advance
+      real(WP), intent(inout) :: Gamma !< Adiabatic index
+      real(WP), intent(inout) :: Pinf  !< Reference pressure
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: U         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: V         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: W         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: P         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: RHO       !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout), optional :: srcRHO !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout), optional :: srcI   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout), optional :: srcU   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout), optional :: srcV   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout), optional :: srcW   !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      integer :: i,j,k,ierr
+      real(WP) :: dti,rho_,srcRHO_,srcI_
+      integer, dimension(3) :: ind_gp
+      real(WP), dimension(3) :: srcvel_,vel,acc,dxdt,dudt,pos_gp
+      real(WP), parameter :: oneHalf=1.0_WP/2.0_WP
+      real(WP), parameter :: oneThird=1.0_WP/3.0_WP
+      real(WP), parameter :: oneSixth=1.0_WP/6.0_WP
+      logical :: apply_neumann
+      
+      ! Zero out source term arrays
+      srcRHO=0.0_WP
+      srcI=0.0_WP
+      srcU=0.0_WP
+      srcV=0.0_WP
+      srcW=0.0_WP
+      dti=1.0_WP/dt
 
-       ! Zero out number of particles removed
-      this%np_out=0
+      select case (stage)
+      case (1)
+         ! First RK step ====================================================================================
+         ! Zero out number of particles removed
+         this%np_out=0
+
+         ! Calculate bond force
+         call this%get_bond_force()
+
+         ! Prepare temporary particle varrays
+         if (allocated(this%pold)) deallocate(this%pold)
+         if (allocated(this%pbuf)) deallocate(this%pbuf)
+         allocate(this%pold(this%np_))
+         allocate(this%pbuf(this%np_))
+         this%pold=this%p
+
+         ! Take a substep
+         do i=1,this%np_
+            if (this%p(i)%id.eq.0) cycle
+            call this%get_source(dti=dti,&
+            &                    Gamma=Gamma,&
+            &                    Pinf=Pinf,&
+            &                    U=U,&
+            &                    V=V,&
+            &                    W=W,&
+            &                    P=P,&
+            &                    RHO=RHO,&
+            &                    p1=this%p(i),&
+            &                    tag=apply_neumann,&
+            &                    pos_gp=pos_gp,&
+            &                    ind_gp=ind_gp,&
+            &                    srcRHO=srcRHO_,&
+            &                    srcI=srcI_,&
+            &                    srcvel=srcvel_)
+            ! Send momentum source terms back to the mesh using particle coordinate
+            if (this%cfg%nx.gt.1) call this%extrapolate(Ap=srcvel_(1),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcU,dir='U')
+            if (this%cfg%ny.gt.1) call this%extrapolate(Ap=srcvel_(2),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcV,dir='V')
+            if (this%cfg%nz.gt.1) call this%extrapolate(Ap=srcvel_(3),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcW,dir='W')
+            ! Send density/energy source terms back to the mesh using ghost point coordinate
+            if (apply_neumann) then
+               call this%extrapolate(Ap=srcRHO_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcRHO,dir='SC')
+               call this%extrapolate(Ap=srcI_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcI,dir='SC')
+            end if
+            ! Get right-hand side terms
+            this%p(i)%drag=-srcvel_
+            acc=this%p(i)%drag/(this%rho*this%dV)
+            dxdt=this%p(i)%vel
+            dudt=this%gravity+this%p(i)%Abond+acc           
+            ! Update particle position
+            if (this%p(i)%id.gt.-2) this%pbuf(i)%pos = this%pold(i)%pos + dt*dxdt*oneSixth
+            if (this%p(i)%id.gt.-2) this%p(i)%pos    = this%pold(i)%pos + dt*dxdt*oneHalf
+            ! Update particle velocity
+            if (this%p(i)%id.gt.-1) this%pbuf(i)%vel = this%pold(i)%vel + dt*dudt*oneSixth
+            if (this%p(i)%id.gt.-1) this%p(i)%vel    = this%pold(i)%vel + dt*dudt*oneHalf
+            ! Correct the position to take into account periodicity
+            if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
+            if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
+            if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
+            ! Handle particles that have left the domain
+            if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
+            ! Relocalize the particle
+            this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+         end do
+
+      case (2)
+         ! Second RK step ====================================================================================
+         do i=1,this%np_
+            if (this%p(i)%id.eq.0) cycle
+            call this%get_source(dti=dti,&
+            &                    Gamma=Gamma,&
+            &                    Pinf=Pinf,&
+            &                    U=U,&
+            &                    V=V,&
+            &                    W=W,&
+            &                    P=P,&
+            &                    RHO=RHO,&
+            &                    p1=this%p(i),&
+            &                    tag=apply_neumann,&
+            &                    pos_gp=pos_gp,&
+            &                    ind_gp=ind_gp,&
+            &                    srcRHO=srcRHO_,&
+            &                    srcI=srcI_,&
+            &                    srcvel=srcvel_)
+            ! Send momentum source terms back to the mesh using particle coordinate
+            if (this%cfg%nx.gt.1) call this%extrapolate(Ap=srcvel_(1),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcU,dir='U')
+            if (this%cfg%ny.gt.1) call this%extrapolate(Ap=srcvel_(2),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcV,dir='V')
+            if (this%cfg%nz.gt.1) call this%extrapolate(Ap=srcvel_(3),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcW,dir='W')
+            ! Send density/energy source terms back to the mesh using ghost point coordinate
+            if (apply_neumann) then
+               call this%extrapolate(Ap=srcRHO_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcRHO,dir='SC')
+               call this%extrapolate(Ap=srcI_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcI,dir='SC')
+            end if
+            ! Get right-hand side terms
+            this%p(i)%drag=-srcvel_
+            acc=this%p(i)%drag/(this%rho*this%dV)
+            dxdt=this%p(i)%vel
+            dudt=this%gravity+this%p(i)%Abond+acc 
+            ! Update particle position
+            if (this%p(i)%id.gt.-2) this%pbuf(i)%pos = this%pbuf(i)%pos + dt*dxdt*oneThird
+            if (this%p(i)%id.gt.-2) this%p(i)%pos    = this%pold(i)%pos + dt*dxdt*oneHalf
+            ! Update particle velocity
+            if (this%p(i)%id.gt.-1) this%pbuf(i)%vel = this%pbuf(i)%vel + dt*dudt*oneThird
+            if (this%p(i)%id.gt.-1) this%p(i)%vel    = this%pold(i)%vel + dt*dudt*oneHalf
+            ! Correct the position to take into account periodicity
+            if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
+            if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
+            if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
+            ! Handle particles that have left the domain
+            if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
+            ! Relocalize the particle
+            this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+         end do
+
+      case (3)
+          ! Third RK step ====================================================================================
+         do i=1,this%np_
+            if (this%p(i)%id.eq.0) cycle
+            call this%get_source(dti=dti,&
+            &                    Gamma=Gamma,&
+            &                    Pinf=Pinf,&
+            &                    U=U,&
+            &                    V=V,&
+            &                    W=W,&
+            &                    P=P,&
+            &                    RHO=RHO,&
+            &                    p1=this%p(i),&
+            &                    tag=apply_neumann,&
+            &                    pos_gp=pos_gp,&
+            &                    ind_gp=ind_gp,&
+            &                    srcRHO=srcRHO_,&
+            &                    srcI=srcI_,&
+            &                    srcvel=srcvel_)
+            ! Send momentum source terms back to the mesh using particle coordinate
+            if (this%cfg%nx.gt.1) call this%extrapolate(Ap=srcvel_(1),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcU,dir='U')
+            if (this%cfg%ny.gt.1) call this%extrapolate(Ap=srcvel_(2),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcV,dir='V')
+            if (this%cfg%nz.gt.1) call this%extrapolate(Ap=srcvel_(3),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcW,dir='W')
+            ! Send density/energy source terms back to the mesh using ghost point coordinate
+            if (apply_neumann) then
+               call this%extrapolate(Ap=srcRHO_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcRHO,dir='SC')
+               call this%extrapolate(Ap=srcI_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcI,dir='SC')
+            end if
+            ! Get right-hand side terms
+            this%p(i)%drag=-srcvel_
+            acc=this%p(i)%drag/(this%rho*this%dV)
+            dxdt=this%p(i)%vel
+            dudt=this%gravity+this%p(i)%Abond+acc
+            ! Update particle position
+            if (this%p(i)%id.gt.-2) this%pbuf(i)%pos = this%pbuf(i)%pos + dt*dxdt*oneThird
+            if (this%p(i)%id.gt.-2) this%p(i)%pos    = this%pold(i)%pos + dt*dxdt
+            ! Update particle velocity
+            if (this%p(i)%id.gt.-1) this%pbuf(i)%vel = this%pbuf(i)%vel + dt*dudt*oneThird
+            if (this%p(i)%id.gt.-1) this%p(i)%vel    = this%pold(i)%vel + dt*dudt
+            ! Correct the position to take into account periodicity
+            if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
+            if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
+            if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
+            ! Handle particles that have left the domain
+            if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
+            ! Relocalize the particle
+            this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+         end do
+
+      case (4)
+         ! Fourth RK step ====================================================================================
+         do i=1,this%np_
+            if (this%p(i)%id.eq.0) cycle
+            call this%get_source(dti=dti,&
+            &                    Gamma=Gamma,&
+            &                    Pinf=Pinf,&
+            &                    U=U,&
+            &                    V=V,&
+            &                    W=W,&
+            &                    P=P,&
+            &                    RHO=RHO,&
+            &                    p1=this%p(i),&
+            &                    tag=apply_neumann,&
+            &                    pos_gp=pos_gp,&
+            &                    ind_gp=ind_gp,&
+            &                    srcRHO=srcRHO_,&
+            &                    srcI=srcI_,&
+            &                    srcvel=srcvel_)
+            ! Send momentum source terms back to the mesh using particle coordinate
+            if (this%cfg%nx.gt.1) call this%extrapolate(Ap=srcvel_(1),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcU,dir='U')
+            if (this%cfg%ny.gt.1) call this%extrapolate(Ap=srcvel_(2),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcV,dir='V')
+            if (this%cfg%nz.gt.1) call this%extrapolate(Ap=srcvel_(3),xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=srcW,dir='W')
+            ! Send density/energy source terms back to the mesh using ghost point coordinate
+            if (apply_neumann) then
+               call this%extrapolate(Ap=srcRHO_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcRHO,dir='SC')
+               call this%extrapolate(Ap=srcI_,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),A=srcI,dir='SC')
+            end if
+            ! Get right-hand side terms
+            this%p(i)%drag=-srcvel_
+            acc=this%p(i)%drag/(this%rho*this%dV)
+            dxdt=this%p(i)%vel
+            dudt=this%gravity+this%p(i)%Abond+acc 
+            ! Update particle position
+            if (this%p(i)%id.gt.-2) this%p(i)%pos = this%pbuf(i)%pos + dt*dxdt*oneSixth
+            ! Update particle velocity
+            if (this%p(i)%id.gt.-1) this%p(i)%vel = this%pbuf(i)%vel + dt*dudt*oneSixth
+            ! Correct the position to take into account periodicity
+            if (this%cfg%xper) this%p(i)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(i)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
+            if (this%cfg%yper) this%p(i)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(i)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
+            if (this%cfg%zper) this%p(i)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(i)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
+            ! Handle particles that have left the domain
+            if (this%p(i)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(i)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(i)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(i)%flag=1
+            if (this%p(i)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(i)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(i)%flag=1
+            ! Relocalize the particle
+            this%p(i)%ind=this%cfg%get_ijk_global(this%p(i)%pos,this%p(i)%ind)
+            ! Count number of particles removed
+            if (this%p(i)%flag.eq.1) then
+               this%np_out=this%np_out+1
+            end if
+         end do
+         ! Communicate particles
+         call this%sync()
+         ! Sum up particles removed
+         call MPI_ALLREDUCE(MPI_IN_PLACE,this%np_out,1,MPI_INTEGER,MPI_SUM,this%cfg%comm,ierr)
+
+      end select
       
-      ! Advance velocity based on old force and position based on mid-velocity
-      do n=1,this%np_
-         ! Advance with Verlet scheme
-         if (this%p(n)%id.gt.-1) this%p(n)%vel=this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
-         if (this%p(n)%id.gt.-2) this%p(n)%pos=this%p(n)%pos+dt*this%p(n)%vel
-         ! Relocalize
-         this%p(n)%ind=this%cfg%get_ijk_global(this%p(n)%pos,this%p(n)%ind)
-         ! Correct the position to take into account periodicity
-         if (this%cfg%xper) this%p(n)%pos(1)=this%cfg%x(this%cfg%imin)+modulo(this%p(n)%pos(1)-this%cfg%x(this%cfg%imin),this%cfg%xL)
-         if (this%cfg%yper) this%p(n)%pos(2)=this%cfg%y(this%cfg%jmin)+modulo(this%p(n)%pos(2)-this%cfg%y(this%cfg%jmin),this%cfg%yL)
-         if (this%cfg%zper) this%p(n)%pos(3)=this%cfg%z(this%cfg%kmin)+modulo(this%p(n)%pos(3)-this%cfg%z(this%cfg%kmin),this%cfg%zL)
-         ! Handle particles that have left the domain
-         if (this%p(n)%pos(1).lt.this%cfg%x(this%cfg%imin).or.this%p(n)%pos(1).gt.this%cfg%x(this%cfg%imax+1)) this%p(n)%flag=1
-         if (this%p(n)%pos(2).lt.this%cfg%y(this%cfg%jmin).or.this%p(n)%pos(2).gt.this%cfg%y(this%cfg%jmax+1)) this%p(n)%flag=1
-         if (this%p(n)%pos(3).lt.this%cfg%z(this%cfg%kmin).or.this%p(n)%pos(3).gt.this%cfg%z(this%cfg%kmax+1)) this%p(n)%flag=1
-         ! Relocalize the particle
-         this%p(n)%ind=this%cfg%get_ijk_global(this%p(n)%pos,this%p(n)%ind)
-         ! Count number of particles removed
-         if (this%p(n)%flag.eq.1) this%np_out=this%np_out+1
-      end do
-      
-      ! Communicate particles
-      call this%sync()
-      
-      ! Sum up particles removed
-      call MPI_ALLREDUCE(this%np_out,n,1,MPI_INTEGER,MPI_SUM,this%cfg%comm,ierr); this%np_out=n
-      
-      ! Calculate bond force
-      call this%get_bond_force()
-      
-      ! Advance velocity only based on new force
-      do n=1,this%np_
-         ! Advance with Verlet scheme
-         stress=this%cfg%get_velocity(pos=this%p(n)%pos,i0=this%p(n)%ind(1),j0=this%p(n)%ind(2),k0=this%p(n)%ind(3),U=stress_x,V=stress_y,W=stress_z)
-         this%p(n)%Afluid=stress/this%rho
-         if (this%p(n)%id.le.-1) cycle
-         this%p(n)%vel=this%p(n)%vel+0.5_WP*dt*(this%gravity+this%p(n)%Abond+this%p(n)%Afluid)
-      end do
+      ! Sum at boundaries
+      call this%cfg%syncsum(srcRHO)
+      call this%cfg%syncsum(srcI)
+      call this%cfg%syncsum(srcU)
+      call this%cfg%syncsum(srcV)
+      call this%cfg%syncsum(srcW)
       
       ! Recompute volume fraction
       call this%update_VF()
@@ -729,120 +812,269 @@ contains
          use string,   only: str_long
          character(len=str_long) :: message
          if (this%cfg%amRoot) then
-            write(message,'("Particle solver [",a,"] on partitioned grid [",a,"]: ",i0," particles were advanced")') trim(this%name),trim(this%cfg%name),this%np
+            write(message,'("Solid solver [",a,"] on partitioned grid [",a,"]: ",i0," particles were advanced")') trim(this%name),trim(this%cfg%name),this%np
             if (verbose.gt.1) write(output_unit,'(a)') trim(message)
             if (verbose.gt.0) call log(message)
          end if
       end block logging
       
-   end subroutine advance
+   end subroutine substep_rk4
 
+
+   !> Compute direct forcing source by a specified time step dt
+   subroutine get_source(this,dti,Gamma,Pinf,U,V,W,P,RHO,p1,tag,pos_gp,ind_gp,srcRHO,srcI,srcvel)
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: U         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: V         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: W         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: P         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: RHO       !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), intent(in) :: dti,Gamma,Pinf
+      type(part), intent(inout) :: p1
+      logical, intent(out) :: tag
+      real(WP), intent(out) :: srcRHO,srcI
+      real(WP), dimension(3), intent(out) :: pos_gp,srcvel
+      integer, dimension(3), intent(out) :: ind_gp
+      real(WP) :: P_IP,RHO_IP,fRHO,RHO_GP,I_GP,P_GP,RHO_tar,I_tar
+      integer, dimension(3) :: ind_ip
+      real(WP), dimension(3) :: fvel,pos_ip,norm
+
+      tag=.false.
+      
+      ! Interpolate fluid quantities to the particle location
+      fvel=0.0_WP
+      if (this%cfg%nx.gt.1) fvel(1)=this%interpolate(A=U,xp=p1%pos(1),yp=p1%pos(2),zp=p1%pos(3),ip=p1%ind(1),jp=p1%ind(2),kp=p1%ind(3),dir='U')
+      if (this%cfg%ny.gt.1) fvel(2)=this%interpolate(A=V,xp=p1%pos(1),yp=p1%pos(2),zp=p1%pos(3),ip=p1%ind(1),jp=p1%ind(2),kp=p1%ind(3),dir='V')
+      if (this%cfg%nz.gt.1) fvel(3)=this%interpolate(A=W,xp=p1%pos(1),yp=p1%pos(2),zp=p1%pos(3),ip=p1%ind(1),jp=p1%ind(2),kp=p1%ind(3),dir='W')
+      fRHO=this%interpolate(A=rho,xp=p1%pos(1),yp=p1%pos(2),zp=p1%pos(3),ip=p1%ind(1),jp=p1%ind(2),kp=p1%ind(3),dir='SC')
+
+      ! Momentum source term computed at every particle
+      srcvel=fRHO*(p1%vel-fvel)*dti*this%dV
+      ! Surface particles handle ghost/image points for Neumann BC
+      if (p1%flag.eq.2) then
+         ! Interpolate norm to particle
+         norm=this%cfg%get_velocity(pos=p1%pos,i0=p1%ind(1),j0=p1%ind(2),k0=p1%ind(3),U=this%norm(1,:,:,:),V=this%norm(2,:,:,:),W=this%norm(3,:,:,:))
+         ! Get ghost/image point coordinates
+         p1%normal=norm/norm2(norm)
+         pos_ip=p1%pos+this%cfg%min_meshsize*norm
+         ind_ip=this%cfg%get_ijk_local(pos_ip,p1%ind)
+         if (this%phase(ind_ip(1),ind_ip(2),ind_ip(3)).eq.0) then
+            ! Image point lies within fluid, we are at the surface
+            tag=.true.
+            pos_gp=p1%pos-this%cfg%min_meshsize*norm
+            ind_gp=this%cfg%get_ijk_local(pos_gp,p1%ind)
+            ! Interpolate fluid quantities to image points
+            P_IP=this%interpolate(A=P,xp=pos_ip(1),yp=pos_ip(2),zp=pos_ip(3),ip=ind_ip(1),jp=ind_ip(2),kp=ind_ip(3),dir='SC')
+            RHO_IP=this%interpolate(A=RHO,xp=pos_ip(1),yp=pos_ip(2),zp=pos_ip(3),ip=ind_ip(1),jp=ind_ip(2),kp=ind_ip(3),dir='SC')
+            ! Interpolate fluid quantities to the ghost point
+            P_GP=this%interpolate(A=P,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),dir='SC')
+            RHO_GP=this%interpolate(A=RHO,xp=pos_gp(1),yp=pos_gp(2),zp=pos_gp(3),ip=ind_gp(1),jp=ind_gp(2),kp=ind_gp(3),dir='SC')
+            ! Reconstruct conserved variables at the ghost point using ideal gas
+            I_GP=(P_GP+Gamma*Pinf)/(RHO_GP*(Gamma-1.0_WP))
+            ! Set target conserved variables to enforce adiabatic BC
+            RHO_tar=RHO_IP
+            I_tar=(P_IP+Gamma*Pinf)/(RHO_IP*(Gamma-1.0_WP))
+            ! Source terms to enforce adiabatic
+            srcRHO=(RHO_tar-RHO_GP)*dti*this%dV
+            srcI=(I_tar-I_GP)*dti*this%dV
+         end if
+      end if
+      
+   end subroutine get_source
 
    !> Update particle volume fraction using our current particles
    subroutine update_VF(this)
       implicit none
       class(lss), intent(inout) :: this
       integer :: i
-      ! Reset volume fraction and momentum
-      this%VF=0.0_WP; this%VFU=0.0_WP; this%VFV=0.0_WP; this%VFW=0.0_WP
+      ! Reset volume fraction
+      this%VF=0.0_WP
+      this%phase=0
       ! Transfer particle volume
       do i=1,this%np_
          ! Skip inactive particle
          if (this%p(i)%flag.eq.1) cycle
          ! Transfer volume to mesh
-         call this%cfg%set_scalar(Sp=this%p(i)%vol,                 pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VF ,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(1),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFU,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(2),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFV,bc='n')
-         call this%cfg%set_scalar(Sp=this%p(i)%vol*this%p(i)%vel(3),pos=this%p(i)%pos,i0=this%p(i)%ind(1),j0=this%p(i)%ind(2),k0=this%p(i)%ind(3),S=this%VFW,bc='n')
+         call this%extrapolate(Ap=this%dV,xp=this%p(i)%pos(1),yp=this%p(i)%pos(2),zp=this%p(i)%pos(3),ip=this%p(i)%ind(1),jp=this%p(i)%ind(2),kp=this%p(i)%ind(3),A=this%VF,dir='SC')
+         ! This cell is not empty
+         this%phase(this%p(i)%ind(1),this%p(i)%ind(2),this%p(i)%ind(3))=1
       end do
-      this%VF =this%VF /this%cfg%vol
-      this%VFU=this%VFU/this%cfg%vol
-      this%VFV=this%VFV/this%cfg%vol
-      this%VFW=this%VFW/this%cfg%vol
       ! Sum at boundaries
-      call this%cfg%syncsum(this%VF )
-      call this%cfg%syncsum(this%VFU)
-      call this%cfg%syncsum(this%VFV)
-      call this%cfg%syncsum(this%VFW)
-      ! Apply volume filter
-      call this%filter(this%VF )
-      call this%filter(this%VFU)
-      call this%filter(this%VFV)
-      call this%filter(this%VFW)
-      ! Clip
-      where (this%VF.lt.0.0_WP) this%VF=0.0_WP
-      this%VF=min(this%VF,1.0_WP-epsilon(1.0_WP))
+      call this%cfg%syncsum(this%VF)
+      ! Synchronize it
+      call this%cfg%sync(this%phase)
+      ! Compute the normal vector based on VF
+      call this%calculate_normal()
+   end subroutine update_VF
 
-    end subroutine update_VF
-    
 
-    !> Laplacian filtering operation
-    subroutine filter(this,A)
+   !> Calculate normal vector from the volume fraction
+   subroutine calculate_normal(this)
+     implicit none
+     class(lss), intent(inout) :: this
+     integer :: i,j,k
+     real(WP) :: buf
+     do k=this%cfg%kmino_+1,this%cfg%kmaxo_
+        do j=this%cfg%jmino_+1,this%cfg%jmaxo_
+           do i=this%cfg%imino_+1,this%cfg%imaxo_
+              this%norm(1,i,j,k)=(this%VF(i,j,k)-this%VF(i-1,j  ,k  ))*this%cfg%dxmi(i)
+              this%norm(2,i,j,k)=(this%VF(i,j,k)-this%VF(i  ,j-1,k  ))*this%cfg%dymi(j)
+              this%norm(3,i,j,k)=(this%VF(i,j,k)-this%VF(i  ,j  ,k-1))*this%cfg%dzmi(k)
+              buf=norm2(this%norm(:,i,j,k))
+              if (buf.gt.0.0_WP) then
+                 this%norm(:,i,j,k)=-this%norm(:,i,j,k)/buf
+              else
+                 this%norm(:,i,j,k)=0.0_WP
+              end if
+           end do
+        end do
+     end do
+     ! Synchronize it
+     call this%cfg%sync(this%norm)
+     ! Extend to non-periodic edges
+     if (.not.this%cfg%xper) then
+        if (this%cfg%iproc.eq.1) then
+           this%norm(:,this%cfg%imino,:,:)=this%norm(:,this%cfg%imino+1,:,:)
+        else if (this%cfg%iproc.eq.this%cfg%npx) then
+           this%norm(:,this%cfg%imaxo,:,:)=this%norm(:,this%cfg%imaxo-1,:,:)
+        end if
+     end if
+     if (.not.this%cfg%yper) then
+        if (this%cfg%jproc.eq.1) then
+           this%norm(:,:,this%cfg%jmino,:)=this%norm(:,:,this%cfg%jmino+1,:)
+        else if (this%cfg%jproc.eq.this%cfg%npy) then
+           this%norm(:,:,this%cfg%jmaxo,:)=this%norm(:,:,this%cfg%jmaxo-1,:)
+        end if
+     end if
+     if (.not.this%cfg%zper) then
+        if (this%cfg%kproc.eq.1) then
+           this%norm(:,:,:,this%cfg%kmino)=this%norm(:,:,:,this%cfg%kmino+1)
+        else if (this%cfg%kproc.eq.this%cfg%npz) then
+           this%norm(:,:,:,this%cfg%kmaxo)=this%norm(:,:,:,this%cfg%kmaxo-1)
+        end if
+     end if
+   end subroutine calculate_normal
+   
+
+   !> Compute regularized delta function
+   subroutine get_delta(this,delta,ic,jc,kc,xp,yp,zp,dir)
       implicit none
       class(lss), intent(inout) :: this
-      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(inout) :: A     !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
-      real(WP) :: filter_coeff
-      integer :: i,j,k,n,nstep
-      real(WP), dimension(:,:,:), allocatable :: FX,FY,FZ
-
-      ! Recompute filter coefficient
-      filter_coeff=max(this%filter_width**2-this%cfg%min_meshsize**2,0.0_WP)/(16.0_WP*log(2.0_WP))
-      if (filter_coeff.le.0.0_WP) return
-
-      ! Allocate flux arrays
-      allocate(FX(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-      allocate(FY(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-      allocate(FZ(this%cfg%imino_:this%cfg%imaxo_,this%cfg%jmino_:this%cfg%jmaxo_,this%cfg%kmino_:this%cfg%kmaxo_))
-
-      if (.not.this%implicit%setup_done) then
-         ! Prepare diffusive operator (only need to do this once)
-         do k=this%cfg%kmin_,this%cfg%kmax_
-            do j=this%cfg%jmin_,this%cfg%jmax_
-               do i=this%cfg%imin_,this%cfg%imax_
-                  this%implicit%opr(1,i,j,k)=1.0_WP-(this%div_x(+1,i,j,k)*filter_coeff*this%grd_x(-1,i+1,j,k)+&
-                  &                                  this%div_x( 0,i,j,k)*filter_coeff*this%grd_x( 0,i  ,j,k)+&
-                  &                                  this%div_y(+1,i,j,k)*filter_coeff*this%grd_y(-1,i,j+1,k)+&
-                  &                                  this%div_y( 0,i,j,k)*filter_coeff*this%grd_y( 0,i,j  ,k)+&
-                  &                                  this%div_z(+1,i,j,k)*filter_coeff*this%grd_z(-1,i,j,k+1)+&
-                  &                                  this%div_z( 0,i,j,k)*filter_coeff*this%grd_z( 0,i,j,k  ))
-                  this%implicit%opr(2,i,j,k)=      -(this%div_x(+1,i,j,k)*filter_coeff*this%grd_x( 0,i+1,j,k))
-                  this%implicit%opr(3,i,j,k)=      -(this%div_x( 0,i,j,k)*filter_coeff*this%grd_x(-1,i  ,j,k))
-                  this%implicit%opr(4,i,j,k)=      -(this%div_y(+1,i,j,k)*filter_coeff*this%grd_y( 0,i,j+1,k))
-                  this%implicit%opr(5,i,j,k)=      -(this%div_y( 0,i,j,k)*filter_coeff*this%grd_y(-1,i,j  ,k))
-                  this%implicit%opr(6,i,j,k)=      -(this%div_z(+1,i,j,k)*filter_coeff*this%grd_z( 0,i,j,k+1))
-                  this%implicit%opr(7,i,j,k)=      -(this%div_z( 0,i,j,k)*filter_coeff*this%grd_z(-1,i,j,k  ))
-               end do
-            end do
-         end do
+      real(WP), intent(out) :: delta   !< Return delta function
+      integer, intent(in) :: ic,jc,kc  !< Cell index
+      real(WP), intent(in) :: xp,yp,zp !< Position of marker 
+      character(len=*) :: dir
+      real(WP) :: deltax,deltay,deltaz,r
+      
+      ! Compute in X
+      if (trim(adjustl(dir)).eq.'U') then
+         r=(xp-this%cfg%x(ic))*this%cfg%dxmi(ic)
+         deltax=roma_kernel(r)*this%cfg%dxmi(ic)
+      else
+         r=(xp-this%cfg%xm(ic))*this%cfg%dxi(ic)
+         deltax=roma_kernel(r)*this%cfg%dxi(ic)
       end if
-      ! Explicit step
-      do k=this%cfg%kmin_,this%cfg%kmax_+1
-         do j=this%cfg%jmin_,this%cfg%jmax_+1
-            do i=this%cfg%imin_,this%cfg%imax_+1
-               FX(i,j,k)=filter_coeff*sum(this%grd_x(:,i,j,k)*A(i-1:i,j,k))
-               FY(i,j,k)=filter_coeff*sum(this%grd_y(:,i,j,k)*A(i,j-1:j,k))
-               FZ(i,j,k)=filter_coeff*sum(this%grd_z(:,i,j,k)*A(i,j,k-1:k))
+      
+      ! Compute in Y
+      if (trim(adjustl(dir)).eq.'V') then
+         r=(yp-this%cfg%y(jc))*this%cfg%dymi(jc)
+         deltay=roma_kernel(r)*this%cfg%dymi(jc)
+      else
+         r=(yp-this%cfg%ym(jc))*this%cfg%dyi(jc)
+         deltay=roma_kernel(r)*this%cfg%dyi(jc)
+      end if
+      
+      ! Compute in Z
+      if (trim(adjustl(dir)).eq.'W') then
+         r=(zp-this%cfg%z(kc))*this%cfg%dzmi(kc)
+         deltaz=roma_kernel(r)*this%cfg%dzmi(kc)
+      else
+         r=(zp-this%cfg%zm(kc))*this%cfg%dzi(kc)
+         deltaz=roma_kernel(r)*this%cfg%dzi(kc)
+      end if
+      
+      ! Put it all together
+      delta=deltax*deltay*deltaz
+      
+   contains
+      ! Mollification kernel
+      ! Roma A, Peskin C and Berger M 1999 J. Comput. Phys. 153 509–534
+      function roma_kernel(r) result(phi)
+         implicit none
+         real(WP), intent(in) :: r
+         real(WP)             :: phi
+         if (abs(r).le.0.5_WP) then
+            phi=1.0_WP/3.0_WP*(1.0_WP+sqrt(-3.0_WP*r**2+1.0_WP))
+         else if (abs(r).gt.0.5_WP .and. abs(r).le.1.5_WP) then
+            phi=1.0_WP/6.0_WP*(5.0_WP-3.0_WP*abs(r)-sqrt(-3.0_WP*(1.0_WP-abs(r))**2+1.0_WP))
+         else
+            phi=0.0_WP
+         end if
+      end function roma_kernel
+      
+   end subroutine get_delta
+   
+   
+   !> Interpolation routine
+   function interpolate(this,A,xp,yp,zp,ip,jp,kp,dir) result(Ap)
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:), intent(in) :: A         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), intent(in) :: xp,yp,zp
+      integer, intent(in) :: ip,jp,kp
+      character(len=*) :: dir
+      real(WP) :: Ap
+      integer :: di,dj,dk
+      integer :: i1,i2,j1,j2,k1,k2
+      real(WP), dimension(-2:+2,-2:+2,-2:+2) :: delta
+      ! Get the interpolation points
+      i1=ip-2; i2=ip+2
+      j1=jp-2; j2=jp+2
+      k1=kp-2; k2=kp+2
+      ! Loop over neighboring cells and compute regularized delta function
+      do dk=-2,+2
+         do dj=-2,+2
+            do di=-2,+2
+               call this%get_delta(delta=delta(di,dj,dk),ic=ip+di,jc=jp+dj,kc=kp+dk,xp=xp,yp=yp,zp=zp,dir=trim(dir))
             end do
          end do
       end do
-      do k=this%cfg%kmin_,this%cfg%kmax_
-         do j=this%cfg%jmin_,this%cfg%jmax_
-            do i=this%cfg%imin_,this%cfg%imax_
-               this%implicit%rhs(i,j,k)=sum(this%div_x(:,i,j,k)*FX(i:i+1,j,k))+sum(this%div_y(:,i,j,k)*FY(i,j:j+1,k))+sum(this%div_z(:,i,j,k)*FZ(i,j,k:k+1))
+      ! Perform the actual interpolation on Ap
+      Ap = sum(delta*A(i1:i2,j1:j2,k1:k2))*this%cfg%vol(ip,jp,kp)
+   end function interpolate
+   
+   
+   !> Extrapolation routine
+   subroutine extrapolate(this,Ap,xp,yp,zp,ip,jp,kp,A,dir)
+      use messager, only: die
+      implicit none
+      class(lss), intent(inout) :: this
+      real(WP), dimension(this%cfg%imino_:,this%cfg%jmino_:,this%cfg%kmino_:) :: A         !< Needs to be (imino_:imaxo_,jmino_:jmaxo_,kmino_:kmaxo_)
+      real(WP), intent(in) :: xp,yp,zp
+      integer, intent(in) :: ip,jp,kp
+      real(WP), intent(in) :: Ap
+      character(len=*) :: dir
+      real(WP), dimension(-2:+2,-2:+2,-2:+2) :: delta
+      integer  :: di,dj,dk
+      ! If particle has left processor domain or reached last ghost cell, kill job
+      if ( ip.lt.this%cfg%imin_-1.or.ip.gt.this%cfg%imax_+1.or.&
+      &    jp.lt.this%cfg%jmin_-1.or.jp.gt.this%cfg%jmax_+1.or.&
+      &    kp.lt.this%cfg%kmin_-1.or.kp.gt.this%cfg%kmax_+1) then
+         write(*,*) ip,jp,kp,xp,yp,zp
+         call die('[df extrapolate] Particle has left the domain')
+      end if
+      ! Loop over neighboring cells and compute regularized delta function
+      do dk=-2,+2
+         do dj=-2,+2
+            do di=-2,+2
+               call this%get_delta(delta=delta(di,dj,dk),ic=ip+di,jc=jp+dj,kc=kp+dk,xp=xp,yp=yp,zp=zp,dir=trim(dir))
             end do
          end do
       end do
-      ! Implicit step
-      call this%implicit%setup()
-      this%implicit%sol=0.0_WP
-      call this%implicit%solve()
-      A=A+this%implicit%sol
-      call this%cfg%sync(A)
-
-      ! Deallocate flux arrays
-      deallocate(FX,FY,FZ)
-
-    end subroutine filter
+      ! Perform the actual extrapolation on A
+      A(ip-2:ip+2,jp-2:jp+2,kp-2:kp+2)=A(ip-2:ip+2,jp-2:jp+2,kp-2:kp+2)+delta*Ap
+   end subroutine extrapolate
 
 
    !> Calculate the CFL
@@ -854,7 +1086,7 @@ contains
       real(WP), intent(in)  :: dt
       real(WP), intent(out) :: cfl
       integer :: i,ierr
-      real(WP) :: my_CFLp_x,my_CFLp_y,my_CFLp_z,kk,mu,a
+      real(WP) :: my_CFLp_x,my_CFLp_y,my_CFLp_z
       
       ! Set the CFLs to zero
       my_CFLp_x=0.0_WP; my_CFLp_y=0.0_WP; my_CFLp_z=0.0_WP
@@ -869,15 +1101,9 @@ contains
       call MPI_ALLREDUCE(my_CFLp_x,this%CFLp_x,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr)
       call MPI_ALLREDUCE(my_CFLp_y,this%CFLp_y,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr)
       call MPI_ALLREDUCE(my_CFLp_z,this%CFLp_z,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr)
-
-      ! CFL based on elastic wave speed in material
-      kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio)
-      mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)      
-      a=sqrt((kk+4.0_WP*mu/3.0_WP)/this%rho)
-      this%CFLp_a=dt*a/this%delta
       
       ! Return the maximum CFL
-      cfl=max(this%CFLp_x,this%CFLp_y,this%CFLp_z,this%CFLp_a)
+      cfl=max(this%CFLp_x,this%CFLp_y,this%CFLp_z)
       
    end subroutine get_cfl
    
@@ -904,7 +1130,7 @@ contains
          this%Umin=min(this%Umin,this%p(i)%vel(1)); this%Umax=max(this%Umax,this%p(i)%vel(1)); this%Umean=this%Umean+this%p(i)%vel(1)
          this%Vmin=min(this%Vmin,this%p(i)%vel(2)); this%Vmax=max(this%Vmax,this%p(i)%vel(2)); this%Vmean=this%Vmean+this%p(i)%vel(2)
          this%Wmin=min(this%Wmin,this%p(i)%vel(3)); this%Wmax=max(this%Wmax,this%p(i)%vel(3)); this%Wmean=this%Wmean+this%p(i)%vel(3)
-         this%ibmForce=this%ibmForce+this%p(i)%Afluid*this%p(i)%vol*this%rho
+         this%ibmForce=this%ibmForce+this%p(i)%drag
       end do
       call MPI_ALLREDUCE(this%Umin ,buf,1,MPI_REAL_WP,MPI_MIN,this%cfg%comm,ierr); this%Umin =buf
       call MPI_ALLREDUCE(this%Umax ,buf,1,MPI_REAL_WP,MPI_MAX,this%cfg%comm,ierr); this%Umax =buf
