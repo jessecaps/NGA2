@@ -1,0 +1,2 @@
+# List here the extra files here
+f90EXE_sources += pdsolver_class.f90 pdhalo_class.f90 pdhash_class.f90 lsspd_class.f90 simulation.f90 geometry.f90 incomp_class.f90 

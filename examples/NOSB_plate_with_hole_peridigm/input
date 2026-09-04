@@ -1,0 +1,42 @@
+# Parallelization
+Partition :	8 1 1
+
+# Mesh definition
+Lx :	1.0
+Ly :	.5
+Lz :	0.00165
+nx :	200
+ny :	100
+nz :	1 # 50
+
+# Case definition
+
+Bar length : 0.35
+Bar width : 0.02
+Inlet velocity :  0.0
+
+# Solid properties
+# Solid Spacing = 0.00165
+# Elastic Modulus : 1.46e6
+# Poisson Ratio : 0.4
+# Material density : 10000
+Critical Energy Release Rate : 1000000
+Horizon Ratio : 3.015
+# Solid Damping Constant : 0.05
+# Tau : 5.0e-4 
+# Fluid properties
+Dynamic viscosity : 0.001
+Density :           1000
+
+# Time integration
+Max timestep size : 6e-7
+Max cfl number :    0.9
+Max time :          25.0e-3
+Unfreeze time: 5.0e-3
+
+# Pressure solver
+Pressure tolerance : 1e-8
+Pressure iteration : 100
+
+# Ensight output
+Ensight output period : 5e-4
