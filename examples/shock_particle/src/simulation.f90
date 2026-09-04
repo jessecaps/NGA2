@@ -340,7 +340,7 @@ module simulation
         ! Get particle density from input
         call param_read('Particle density',lp%rho)
         ! Get particle specific heat from input
-        call param_read('Particle heat capacit',lp%Cp)
+        call param_read('Particle heat capacity',lp%Cp)
         ! Get particle diameter from input
         call param_read('Particle diameter',dp)
         ! Get particle temperature from input
