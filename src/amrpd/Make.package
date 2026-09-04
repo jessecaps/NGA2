@@ -1,0 +1,4 @@
+f90EXE_sources += pdhash_class.f90 pdhalo_class.f90 pdsolver_class.f90 
+
+INCLUDE_LOCATIONS += $(NGA_HOME)/src/amrpd
+VPATH_LOCATIONS   += $(NGA_HOME)/src/amrpd
