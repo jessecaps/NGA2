@@ -125,22 +125,118 @@ module simulation
    end subroutine get_div
 
 
-   !> Apply boundary conditions
+ !> Apply boundary conditions
    subroutine apply_bconds()
+     use messager, only: die
      implicit none
      integer :: i,j,k
+     real(WP) :: rho_int,p_int,u_int,c_int,M_int
+     real(WP) :: rho_inf,p_inf,u_inf,c_inf,s_inf
+     real(WP) :: Rminus,Rplus,u_bc,c_bc,p_bc,rho_bc
 
-     ! Apply clipped Neumann on primitive variables in x+
-     if (.not.fs%cfg%xper.and.fs%cfg%iproc.eq.fs%cfg%npx) then
+     ! Apply characteristic-based far-field (inflow) at x-
+     if (.not.fs%cfg%xper.and.fs%cfg%iproc.eq.1) then
+        ! Far-field reference state (post-shock)
+        rho_inf=rho2; p_inf=p2; u_inf=u2
+        c_inf=sqrt(Gamma*p_inf/rho_inf)
         do k=fs%cfg%kmino_,fs%cfg%kmaxo_; do j=fs%cfg%jmino_,fs%cfg%jmaxo_
+           ! Interior state just inside boundary (cell centered)
+           rho_int=fs%Q(fs%cfg%imin,j,k,1)
+           p_int=fs%P(fs%cfg%imin,j,k)
+           u_int=0.5_WP*(fs%U(fs%cfg%imin,j,k)+fs%U(fs%cfg%imin+1,j,k))
+           c_int=sqrt(Gamma*p_int/rho_int)
+           M_int=abs(u_int)/c_int
+           if (u_int.ge.0.0_WP) then
+              ! ---------- INFLOW (flow entering from left) ----------
+              if (M_int.lt.1.0_WP) then
+                 ! Subsonic inflow
+                 Rplus  = u_inf + 2.0_WP*c_inf/(Gamma-1.0_WP)  ! Incoming
+                 Rminus = u_int - 2.0_WP*c_int/(Gamma-1.0_WP)  ! Outgoing
+                 u_bc = 0.5_WP*(Rplus + Rminus)
+                 c_bc = 0.25_WP*(Gamma-1.0_WP)*(Rplus - Rminus)
+                 c_bc = max(c_bc, epsilon(1.0_WP))
+                 p_bc = p_inf*(c_bc/c_inf)**(2.0_WP*Gamma/(Gamma-1.0_WP))
+                 rho_bc = Gamma*p_bc/c_bc**2
+              else
+                 ! Supersonic inflow: impose all far-field values
+                 u_bc   = u_inf
+                 c_bc   = c_inf
+                 p_bc   = p_inf
+                 rho_bc = rho_inf
+              endif
+           else
+              ! ---------- OUTFLOW (reflected wave leaving through left) ----------
+              if (M_int .lt. 1.0_WP) then
+                 ! Subsonic outflow: allow wave to exit
+                 ! For LEFT boundary outflow, characteristics are reversed
+                 Rplus  = u_int + 2.0_WP*c_int/(Gamma-1.0_WP)  ! Outgoing (left)
+                 Rminus = u_inf - 2.0_WP*c_inf/(Gamma-1.0_WP)  ! Incoming (right)
+                 u_bc = 0.5_WP*(Rplus + Rminus)
+                 c_bc = 0.25_WP*(Gamma-1.0_WP)*(Rplus - Rminus)
+                 c_bc = max(c_bc,epsilon(1.0_WP))
+                 ! For outflow, specify back pressure
+                 s_inf = p_inf/rho_inf**Gamma
+                 p_bc = p_inf
+                 rho_bc = (p_bc/s_inf)**(1.0_WP/Gamma)
+              else
+                 ! Supersonic outflow: extrapolate interior
+                 u_bc   = u_int
+                 c_bc   = c_int
+                 p_bc   = p_int
+                 rho_bc = rho_int
+              endif
+           endif
+           if (rho_bc.le.0.0_WP.or.p_bc.le.0.0_WP) call die('[apply_bconds] unphysical BC')
+           ! Copy over from imin to imin-1 and below
+           do i=fs%cfg%imino,fs%cfg%imin-1
+              ! Copy primitive variables
+              lp%VF(i,j,k)=lp%VF(fs%cfg%imin,j,k)
+              fs%Q(i,j,k,1)=rho_bc
+              fs%P(i,j,k)=p_bc
+              fs%I(i,j,k)=get_I(rho_bc,p_bc)
+              fs%U(i,j,k)=u_bc
+              fs%V(i,j,k)=fs%V(fs%cfg%imin,j,k)
+              fs%W(i,j,k)=fs%W(fs%cfg%imin,j,k)
+           end do
+        end do; end do
+     end if
+
+     ! Apply characteristic-based far-field (outflow) at x+
+     if (.not.fs%cfg%xper.and.fs%cfg%iproc.eq.fs%cfg%npx) then
+        ! Far-field reference state (pre-shock)
+        rho_inf=rho1; p_inf=p1; u_inf=u1
+        c_inf=sqrt(Gamma*p_inf/rho_inf)
+        do k=fs%cfg%kmino_,fs%cfg%kmaxo_; do j=fs%cfg%jmino_,fs%cfg%jmaxo_
+           ! Interior state just inside boundary (cell centered)
+           rho_int=fs%Q(fs%cfg%imax,j,k,1)
+           p_int=fs%P(fs%cfg%imax,j,k)
+           u_int=0.5_WP*(3.0_WP*fs%U(fs%cfg%imax,j,k)-fs%U(fs%cfg%imax-1,j,k))
+           c_int=sqrt(Gamma*p_int/rho_int)
+           if(abs(u_int)/c_int.lt.1.0_WP) then
+              ! Riemann invariants
+              Rplus  = u_int + 2.0_WP*c_int/(Gamma-1.0_WP)
+              Rminus = u_inf - 2.0_wp*c_inf/(Gamma-1.0_WP)
+              u_bc = 0.5_WP*(Rplus + Rminus)
+              c_bc = 0.25_WP*(Gamma-1.0_WP)*(Rplus - Rminus)
+              c_bc=max(c_bc,epsilon(1.0_WP))
+              p_bc = p_inf*(c_bc/c_inf)**(2.0_WP*Gamma/(Gamma-1.0_WP))
+              rho_bc = Gamma*p_bc/c_bc**2
+              if (rho_bc.le.0.0_WP.or.p_bc.le.0.0_WP) call die('[apply_bconds] unphysical BC')
+           else
+              ! Supersonic: all characteristics leaving, resort to Neumann
+              u_bc   = u_int
+              c_bc   = c_int
+              p_bc   = p_int
+              rho_bc = rho_int
+           endif
            ! Copy over from imax to imax+1 and above
            do i=fs%cfg%imax+1,fs%cfg%imaxo
               ! Copy primitive variables
               lp%VF(i,j,k)=lp%VF(fs%cfg%imax,j,k)
-              fs%Q(i,j,k,1)=fs%Q(fs%cfg%imax,j,k,1)
-              fs%P(i,j,k)=fs%P(fs%cfg%imax,j,k)
-              fs%I(i,j,k)=fs%I(fs%cfg%imax,j,k)
-              fs%U(i,j,k)=max(fs%U(fs%cfg%imax,j,k),0.0_WP)
+              fs%Q(i,j,k,1)=rho_bc
+              fs%P(i,j,k)=p_bc
+              fs%I(i,j,k)=get_I(rho_bc,p_bc)
+              fs%U(i,j,k)=u_bc
               fs%V(i,j,k)=fs%V(fs%cfg%imax,j,k)
               fs%W(i,j,k)=fs%W(fs%cfg%imax,j,k)
            end do
@@ -183,7 +279,7 @@ module simulation
         end do; end do
      end if
 
-      ! Apply clipped Neumann on primitive variables in z+
+     ! Apply clipped Neumann on primitive variables in z+
      if (.not.fs%cfg%zper.and.fs%cfg%kproc.eq.fs%cfg%npz) then
         do j=fs%cfg%jmino_,fs%cfg%jmaxo_; do i=fs%cfg%imino_,fs%cfg%imaxo_
            ! Copy over from kmax to kmax+1 and above
@@ -503,6 +599,7 @@ module simulation
          call ens_out%add_vector('velocity',Ui,Vi,Wi)
          call ens_out%add_scalar('P',fs%P)
          call ens_out%add_scalar('T',fs%T)
+         call ens_out%add_scalar('RHO',fs%rho)
          call ens_out%add_scalar('Mach',Ma)
          call ens_out%add_scalar('beta',beta)
          call ens_out%add_scalar('visc',visc)
