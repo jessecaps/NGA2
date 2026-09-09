@@ -1,5 +1,5 @@
 # Parallelization
-Partition :	8 1 1
+Partition :	1 1 1
 
 # Mesh definition
 Lx :	1.0
@@ -29,7 +29,7 @@ Dynamic viscosity : 0.001
 Density :           1000
 
 # Time integration
-Max timestep size : 6e-7
+Max timestep size : 6e-6
 Max cfl number :    0.9
 Max time :          25.0e-3
 Unfreeze time: 5.0e-3

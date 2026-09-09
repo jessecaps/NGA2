@@ -122,7 +122,7 @@ module simulation
          call param_read('L',L,default=0.1_WP)
          call param_read('H',H,default=0.1_WP)
          call param_read('W',W,default=0.02_WP)
-         call param_read('N_w',N_w,default=17)
+         call param_read('N_w',N_w,default=5)
          elem = W/real(N_w,WP)
          call param_read('Horizon',         delta,default=3.0125_WP*elem)
 

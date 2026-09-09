@@ -165,6 +165,10 @@ module pdsolver_class
       ! Damping rate for steady state
       real(WP) :: damping_rate=0.0_WP
 
+      ! NOSB Tracked parameters
+      real(WP), allocatable :: F_mat(:,:,:)    !< F matrix (:,:,nown)
+      real(WP), allocatable :: PK_inv(:,:,:)   !< P*K^-1 matrix (:,:,nown)
+
       
 
 
@@ -234,6 +238,7 @@ contains
       allocate(this%v(3,max(n,1)),this%f(3,max(n,1)),this%ff(3,max(n,1)))
       allocate(this%mw(max(n,1)),this%theta(max(n,1)),this%flag(max(n,1)))
       allocate(this%vol(max(n,1)),this%damage(max(n,1)),this%lam_p(max(n,1)))
+      allocate(this%PK_inv(3,3,max(n,1)),this%F_mat(3,3,max(n,1)))
       do i=1,n
          this%gid(i) =gids(i)
          this%x0(:,i)=pos(:,i)
@@ -243,6 +248,7 @@ contains
          this%vol(i)   =vol(i)
       end do
       this%f=0.0_WP; this%ff=0.0_WP; this%mw=0.0_WP; this%theta=0.0_WP; this%damage=0.0_WP; this%lam_p=0.0_WP
+      this%F_mat=0.0_WP; this%PK_inv=0.0_WP
       call this%ohash%build(n,gids(1:n))
    end subroutine set_nodes
 
@@ -765,17 +771,23 @@ contains
       real(WP) :: sYe2,strial,mu3i
       logical :: plastic,do_j2
       real(WP), dimension(3) :: acc,dxv,fx
+      real(WP), dimension(3,3) :: K_mat,E_mat,I_mat,S_mat,K_inv,sigma, s_dev
+      real(WP) :: detK,traceE
+      real(WP) :: kk,mu
+      real(WP), dimension(3) :: xi,rpos,z,t1,t2,tc
       integer :: i,e,j
 
       rho_inv=1.0_WP/this%rho
+      mu=this%elastic_modulus/(2.0_WP+2.0_WP*this%poisson_ratio)
+      kk=this%elastic_modulus/(3.0_WP-6.0_WP*this%poisson_ratio)
       call this%lps_coefs(fdim,cvol,cdev,psi_fac)
-      ! Viscoplastic setup: decay is loop-invariant (exact exponential update,
-      ! unconditionally stable -- no viscous CFL)
-      plastic=(this%tau.gt.0.0_WP.and.this%tau.lt.huge(1.0_WP))
-      do_j2=(this%sigma_yield.gt.0.0_WP)
-      decay=0.0_WP
-      if (plastic) decay=exp(-dt/this%tau)
-      mu3i=2.0_WP*(1.0_WP+this%poisson_ratio)/(3.0_WP*this%elastic_modulus)   ! 1/(3*mu_shear)
+      ! ! Viscoplastic setup: decay is loop-invariant (exact exponential update,
+      ! ! unconditionally stable -- no viscous CFL)
+      ! plastic=(this%tau.gt.0.0_WP.and.this%tau.lt.huge(1.0_WP))
+      ! do_j2=(this%sigma_yield.gt.0.0_WP)
+      ! decay=0.0_WP
+      ! if (plastic) decay=exp(-dt/this%tau)
+      ! mu3i=2.0_WP*(1.0_WP+this%poisson_ratio)/(3.0_WP*this%elastic_modulus)   ! 1/(3*mu_shear)
 
       ! First half-kick and drift (owned nodes)
       t0=parallel_time()
@@ -860,26 +872,77 @@ contains
          this%wt_halo=this%wt_halo+(parallel_time()-t0)
       end if
 
-      ! Dilatation (pure gather; own family only; broken entries excluded --
-      ! breaks happen in the force sweep AFTER this, matching amrpd's ordering)
-      t0=parallel_time()
+      ! ! Dilatation (pure gather; own family only; broken entries excluded --
+      ! ! breaks happen in the force sweep AFTER this, matching amrpd's ordering)
+      ! t0=parallel_time()
+      ! do i=1,this%nown
+      !    this%theta(i)=0.0_WP
+      !    do e=this%ptr(i),this%ptr(i+1)-1
+      !       if (this%dmg(e).ne.0_1) cycle
+      !       j=this%lst(e)
+      !       zeta=sqrt(sum((this%x0(:,j)-this%x0(:,i))**2))
+      !       dY  =sqrt(sum((this%y(:,j) -this%y(:,i) )**2))
+      !       e_b=dY-zeta
+      !       this%theta(i)=this%theta(i)+omega(zeta,this%delta)*zeta*e_b*this%vol(j)
+      !    end do
+      !    if (this%mw(i).gt.0.0_WP) then
+      !       this%theta(i)=fdim*this%theta(i)/this%mw(i)
+      !    else
+      !       this%theta(i)=0.0_WP
+      !    end if
+      ! end do
+      ! this%wt_dil=this%wt_dil+(parallel_time()-t0)
+
+      ! Equivalent to the dilatation sweep from before, I think that each one needs to sweep over 
+      ! and compute the tensors K_mat and F
+      I_mat = 0.0_WP
+      I_mat(1,1) = 1.0_WP
+      I_mat(2,2) = 1.0_WP
+      I_mat(3,3) = 1.0_WP
       do i=1,this%nown
-         this%theta(i)=0.0_WP
+            K_mat=0.0_WP
+            K_inv = 0.0_WP
+            S_mat = 0.0_WP
+            traceE = 0.0_WP
+            E_mat = 0.0_WP
+            this%F_mat(:,:,i)=0.0_WP
+            this%PK_inv(:,:,i)=0.0_WP
          do e=this%ptr(i),this%ptr(i+1)-1
             if (this%dmg(e).ne.0_1) cycle
             j=this%lst(e)
-            zeta=sqrt(sum((this%x0(:,j)-this%x0(:,i))**2))
-            dY  =sqrt(sum((this%y(:,j) -this%y(:,i) )**2))
-            e_b=dY-zeta
-            this%theta(i)=this%theta(i)+omega(zeta,this%delta)*zeta*e_b*this%vol(j)
+            xi=this%x0(:,j)-this%x0(:,i)
+            rpos=this%y(:,j) -this%y(:,i)
+            zeta=sqrt(sum(xi**2))
+            w = omega(zeta,this%delta)
+            K_mat(1,1)=K_mat(1,1)+xi(1)*xi(1)*w*this%vol(j); K_mat(1,2)=K_mat(1,2)+xi(1)*xi(2)*w*this%vol(j); K_mat(1,3)=K_mat(1,3)+xi(1)*xi(3)*w*this%vol(j);
+            K_mat(2,1)=K_mat(2,1)+xi(2)*xi(1)*w*this%vol(j); K_mat(2,2)=K_mat(2,2)+xi(2)*xi(2)*w*this%vol(j); K_mat(2,3)=K_mat(2,3)+xi(2)*xi(3)*w*this%vol(j);
+            K_mat(3,1)=K_mat(3,1)+xi(3)*xi(1)*w*this%vol(j); K_mat(3,2)=K_mat(3,2)+xi(3)*xi(2)*w*this%vol(j); K_mat(3,3)=K_mat(3,3)+xi(3)*xi(3)*w*this%vol(j);
+
+            this%F_mat(1,1,i)=this%F_mat(1,1,i)+rpos(1)*xi(1)*w*this%vol(j); this%F_mat(1,2,i)=this%F_mat(1,2,i)+rpos(1)*xi(2)*w*this%vol(j); this%F_mat(1,3,i)=this%F_mat(1,3,i)+rpos(1)*xi(3)*w*this%vol(j);
+            this%F_mat(2,1,i)=this%F_mat(2,1,i)+rpos(2)*xi(1)*w*this%vol(j); this%F_mat(2,2,i)=this%F_mat(2,2,i)+rpos(2)*xi(2)*w*this%vol(j); this%F_mat(2,3,i)=this%F_mat(2,3,i)+rpos(2)*xi(3)*w*this%vol(j);
+            this%F_mat(3,1,i)=this%F_mat(3,1,i)+rpos(3)*xi(1)*w*this%vol(j); this%F_mat(3,2,i)=this%F_mat(3,2,i)+rpos(3)*xi(2)*w*this%vol(j); this%F_mat(3,3,i)=this%F_mat(3,3,i)+rpos(3)*xi(3)*w*this%vol(j);
          end do
-         if (this%mw(i).gt.0.0_WP) then
-            this%theta(i)=fdim*this%theta(i)/this%mw(i)
-         else
-            this%theta(i)=0.0_WP
-         end if
+
+         detK = K_mat(1,1)*(K_mat(2,2)*K_mat(3,3)-K_mat(2,3)*K_mat(3,2)) &
+               -K_mat(1,2)*(K_mat(2,1)*K_mat(3,3)-K_mat(2,3)*K_mat(3,1)) &
+               +K_mat(1,3)*(K_mat(2,1)*K_mat(3,2)-K_mat(2,2)*K_mat(3,1))
+         K_inv(1,1) =  (K_mat(2,2)*K_mat(3,3) - K_mat(2,3)*K_mat(3,2))/detK
+         K_inv(2,1) = -(K_mat(2,1)*K_mat(3,3) - K_mat(2,3)*K_mat(3,1))/detK
+         K_inv(3,1) =  (K_mat(2,1)*K_mat(3,2) - K_mat(2,2)*K_mat(3,1))/detK
+         K_inv(1,2) = -(K_mat(1,2)*K_mat(3,3) - K_mat(1,3)*K_mat(3,2))/detK
+         K_inv(2,2) =  (K_mat(1,1)*K_mat(3,3) - K_mat(1,3)*K_mat(3,1))/detK
+         K_inv(3,2) = -(K_mat(1,1)*K_mat(3,2) - K_mat(1,2)*K_mat(3,1))/detK
+         K_inv(1,3) =  (K_mat(1,2)*K_mat(2,3) - K_mat(1,3)*K_mat(2,2))/detK
+         K_inv(2,3) = -(K_mat(1,1)*K_mat(2,3) - K_mat(1,3)*K_mat(2,1))/detK
+         K_inv(3,3) =  (K_mat(1,1)*K_mat(2,2) - K_mat(1,2)*K_mat(2,1))/detK
+         
+         this%F_mat(:,:,i) = MATMUL(this%F_mat(:,:,i),K_inv)
+         E_mat = 0.5_WP * (MATMUL(TRANSPOSE(this%F_mat(:,:,i)),this%F_mat(:,:,i))-I_mat)
+         traceE = E_mat(1,1) + E_mat(2,2) + E_mat(3,3)
+         S_mat = (kk-2.0_WP/3.0_WP*mu)*traceE*I_mat + 2.0_WP*mu*E_mat
+         this%PK_inv(:,:,i) = MATMUL(MATMUL(this%F_mat(:,:,i),S_mat),K_inv)
       end do
-      this%wt_dil=this%wt_dil+(parallel_time()-t0)
+
 
       ! Node-centered force sweep: each row computes its OWN force state t
       ! (own theta, own mw) and scatters +t/-t; the neighbor's t arrives from
@@ -887,32 +950,38 @@ contains
       t0=parallel_time()
       this%f=0.0_WP
       do i=1,this%nown
-         if (this%mw(i).le.0.0_WP) cycle
-         ! Per-node J2 return factor from the LAGGED family norm. With
-         ! hardening (hard_mod>0) the surface radius grows with the node's
-         ! accumulated equivalent plastic strain lam_p (surface lagged one
-         ! substep like the norm: exact to O(H/3mu) per substep, and H<<3mu
-         ! for metals; stress-space equivalent of Peridigm's
-         ! elastic_plastic_hardening). The increment uses (1-beta)*strial =
-         ! the trial-stress excess, so the rate-independent limit matches the
-         ! classical radial return; (1-decay) is the Perzyna-realized
-         ! fraction. lam_p accumulates even at hard_mod=0 (free plastic-
-         ! strain diagnostic; forces unchanged there, bit-exact w/ flat yield).
-         beta=1.0_WP
-         if (plastic.and.do_j2) then
-            sYe2=(this%sigma_yield+this%hard_mod*this%lam_p(i))**2
-            if (this%td2(i)*this%mw(i).gt.psi_fac*sYe2) then
-               beta=sqrt(psi_fac*sYe2/(this%td2(i)*this%mw(i)))
-               strial=sqrt(this%td2(i)*this%mw(i)/psi_fac)
-               this%lam_p(i)=this%lam_p(i)+(1.0_WP-beta)*(1.0_WP-decay)*strial*mu3i
-            end if
-         end if
-         do e=this%ptr(i),this%ptr(i+1)-1
+         ! if (this%mw(i).le.0.0_WP) cycle
+         ! ! Per-node J2 return factor from the LAGGED family norm. With
+         ! ! hardening (hard_mod>0) the surface radius grows with the node's
+         ! ! accumulated equivalent plastic strain lam_p (surface lagged one
+         ! ! substep like the norm: exact to O(H/3mu) per substep, and H<<3mu
+         ! ! for metals; stress-space equivalent of Peridigm's
+         ! ! elastic_plastic_hardening). The increment uses (1-beta)*strial =
+         ! ! the trial-stress excess, so the rate-independent limit matches the
+         ! ! classical radial return; (1-decay) is the Perzyna-realized
+         ! ! fraction. lam_p accumulates even at hard_mod=0 (free plastic-
+         ! ! strain diagnostic; forces unchanged there, bit-exact w/ flat yield).
+         ! beta=1.0_WP
+         ! if (plastic.and.do_j2) then
+         !    sYe2=(this%sigma_yield+this%hard_mod*this%lam_p(i))**2
+         !    if (this%td2(i)*this%mw(i).gt.psi_fac*sYe2) then
+         !       beta=sqrt(psi_fac*sYe2/(this%td2(i)*this%mw(i)))
+         !       strial=sqrt(this%td2(i)*this%mw(i)/psi_fac)
+         !       this%lam_p(i)=this%lam_p(i)+(1.0_WP-beta)*(1.0_WP-decay)*strial*mu3i
+         !    end if
+         ! end if
+
+         ! We are not currently doing the plastic behavior, so we can skip this
+         do e=this%ptr(i),this%ptr(i+1)-1                         !IVM, does this work out so that each point is visited at the main, or do we only end up visiting half??
             if (this%dmg(e).ne.0_1) cycle
             j=this%lst(e)
-            zeta=sqrt(sum((this%x0(:,j)-this%x0(:,i))**2))
-            dxv=this%y(:,j)-this%y(:,i)
-            dY=sqrt(sum(dxv**2))
+            ! zeta=sqrt(sum((this%x0(:,j)-this%x0(:,i))**2))
+            ! dxv=this%y(:,j)-this%y(:,i)
+            ! dY=sqrt(sum(dxv**2))
+            xi=this%x0(:,j)-this%x0(:,i)
+            rpos=this%y(:,j) -this%y(:,i)
+            zeta=sqrt(sum(xi**2))
+            dY = sqrt(sum(rpos**2))
             if (dY.le.0.0_WP) cycle
             e_b=dY-zeta
             ! Brittle break on total stretch (e > s0*zeta), irreversible.
@@ -929,42 +998,52 @@ contains
                cycle
             end if
             w=omega(zeta,this%delta)
-            ! Deviatoric split: e_d carries this HALF-ENTRY's inelastic stretch
-            ! e_v (per-side history: own theta, own mw -- Peridigm form; e_v=0
-            ! recovers canonical elastic LPS bit-for-bit)
-            e_d=e_b-this%theta(i)*zeta/fdim
-            td=w/this%mw(i)*cdev*(e_d-this%visc_lambda*this%e_v(e))
-            t =w/this%mw(i)*cvol*this%theta(i)*zeta+td
-            ! J2 family norm: pure own-row gather (no communication)
-            if (do_j2) this%td2a(i)=this%td2a(i)+td*td*this%vol(j)
-            ! Pair contribution from THIS row's force state (Peridigm volumes:
-            ! +t*V_j to self, -t*V_i to the neighbor)
-            fx=t*dxv/dY
-            this%f(:,i)=this%f(:,i)+fx*this%vol(j)
-            this%f(:,j)=this%f(:,j)-fx*this%vol(i)
-            ! Per-side viscoplastic flow of e_v (exact exponential). Two yield
-            ! criteria, as in amrpd:
-            !   sigma_yield>0: J2 radial return (per-node beta computed at the
-            !     row head above, incl. isotropic hardening), Perzyna-
-            !     regularized by (1-decay); tau->0 recovers Peridigm's
-            !     rate-independent return.
-            !   else: per-bond overstress (yield_stretch=0 -> pure Maxwell).
-            if (plastic) then
-               if (do_j2) then
-                  this%e_v(e)=this%e_v(e)+(1.0_WP-beta)*(e_d-this%e_v(e))*(1.0_WP-decay)
-               else
-                  e_e=e_d-this%e_v(e)
-                  over=abs(e_e)-this%yield_stretch*zeta
-                  if (over.gt.0.0_WP) this%e_v(e)=this%e_v(e)+sign(over*(1.0_WP-decay),e_e)
-               end if
-            end if
+            ! ! Deviatoric split: e_d carries this HALF-ENTRY's inelastic stretch
+            ! ! e_v (per-side history: own theta, own mw -- Peridigm form; e_v=0
+            ! ! recovers canonical elastic LPS bit-for-bit)
+            ! e_d=e_b-this%theta(i)*zeta/fdim
+            ! td=w/this%mw(i)*cdev*(e_d-this%visc_lambda*this%e_v(e))
+            ! t =w/this%mw(i)*cvol*this%theta(i)*zeta+td
+            ! ! J2 family norm: pure own-row gather (no communication)
+            ! if (do_j2) this%td2a(i)=this%td2a(i)+td*td*this%vol(j)
+            ! ! Pair contribution from THIS row's force state (Peridigm volumes:
+            ! ! +t*V_j to self, -t*V_i to the neighbor)
+            ! fx=t*dxv/dY
+            ! this%f(:,i)=this%f(:,i)+fx*this%vol(j)
+            ! this%f(:,j)=this%f(:,j)-fx*this%vol(i)
+            ! ! Per-side viscoplastic flow of e_v (exact exponential). Two yield
+            ! ! criteria, as in amrpd:
+            ! !   sigma_yield>0: J2 radial return (per-node beta computed at the
+            ! !     row head above, incl. isotropic hardening), Perzyna-
+            ! !     regularized by (1-decay); tau->0 recovers Peridigm's
+            ! !     rate-independent return.
+            ! !   else: per-bond overstress (yield_stretch=0 -> pure Maxwell).
+            ! if (plastic) then
+            !    if (do_j2) then
+            !       this%e_v(e)=this%e_v(e)+(1.0_WP-beta)*(e_d-this%e_v(e))*(1.0_WP-decay)
+            !    else
+            !       e_e=e_d-this%e_v(e)
+            !       over=abs(e_e)-this%yield_stretch*zeta
+            !       if (over.gt.0.0_WP) this%e_v(e)=this%e_v(e)+sign(over*(1.0_WP-decay),e_e)
+            !    end if
+            ! end if
+
+            ! Now we compute forces, similar to before, but we only plus up the one particle instead of being slick with both 
+            t1 = w*MATMUL(this%PK_inv(:,:,i),xi)                              
+            ! Force density 2->1
+            t2 = w*MATMUL(this%PK_inv(:,:,j),xi)    
+            ! Force correction term
+            z = rpos-MATMUL(this%F_mat(:,:,i),xi)
+            tc = w*(9.0_WP*kk/((3.14159265_WP) * this%delta**4))*(dot_product(xi,z)/(sqrt(dot_product(xi,xi)))**3)*xi       
+            ! Compute bond acceleration
+            this%f(:,i)=this%f(:,i)+(t1+t2+tc)*this%vol(j)
          end do
       end do
-      ! Publish this substep's J2 norm (read by the NEXT substep's return)
-      if (do_j2) then
-         this%td2(1:this%nown)=this%td2a(1:this%nown)
-         this%td2a(1:this%nown)=0.0_WP
-      end if
+      ! ! Publish this substep's J2 norm (read by the NEXT substep's return)
+      ! if (do_j2) then
+      !    this%td2(1:this%nown)=this%td2a(1:this%nown)
+      !    this%td2a(1:this%nown)=0.0_WP
+      ! end if
       this%wt_force=this%wt_force+(parallel_time()-t0)
 
       ! Assemble cross-rank pair forces (halo slots -> owners, add)
@@ -2114,21 +2193,33 @@ contains
    !> flip by (un)commenting -- s0-from-G_c, psi_fac, and the critical-dt
    !> diagnostic all generalize through wmoment(), so nothing else changes.
    pure function omega(d,h) result(w)
+      ! implicit none
+      ! real(WP), intent(in) :: d,h
+      ! real(WP) :: w
+      ! real(WP) :: s
+      ! ! Parabolic decay (ACTIVE): 1 in the core, C1 taper to 0 at the horizon
+      ! s=d/h
+      ! if (s.lt.0.5_WP) then
+      !    w=1.0_WP
+      ! else
+      !    w=max(4.0_WP*s*(1.0_WP-s),0.0_WP)
+      ! end if
+      ! ! Constant (Peridigm default; pre-2026-07-16 behavior)
+      ! !w=1.0_WP
+      ! ! Gaussian
+      ! !w=exp(-(d/(0.4_WP*h))**2)
       implicit none
       real(WP), intent(in) :: d,h
-      real(WP) :: w
-      real(WP) :: s
-      ! Parabolic decay (ACTIVE): 1 in the core, C1 taper to 0 at the horizon
-      s=d/h
-      if (s.lt.0.5_WP) then
-         w=1.0_WP
+      real(WP), parameter :: coeff=2.6_WP
+      real(WP) :: hh, w
+      ! hh=coeff*h
+      hh=h
+      if (d.ge.hh) then
+         w=0.0_WP
       else
-         w=max(4.0_WP*s*(1.0_WP-s),0.0_WP)
+         ! wgauss=(1.0_WP+4.0_WP*d/hh)*(1.0_WP-d/hh)**4
+         w=(1.0_WP-d/h)**3
       end if
-      ! Constant (Peridigm default; pre-2026-07-16 behavior)
-      !w=1.0_WP
-      ! Gaussian
-      !w=exp(-(d/(0.4_WP*h))**2)
    end function omega
 
    !> Moment of the influence function: int_0^delta w(z)^wpow * z^zpow dz
